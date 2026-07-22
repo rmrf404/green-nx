@@ -1,0 +1,16 @@
+# Desktop (macOS/Linux) build of the CLI test harness.
+# Usage: make -f Makefile.pc && ./build/pc/greennx login
+
+CXX      ?= clang++
+CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
+OUT      := build/pc
+SRC      := $(wildcard src/core/*.cpp) src/cli/main.cpp
+
+$(OUT)/greennx: $(SRC) src/core/*.hpp vendor/json.hpp
+	@mkdir -p $(OUT)
+	$(CXX) $(CXXFLAGS) $(SRC) -lcurl -o $@
+
+clean:
+	rm -rf build/pc
+
+.PHONY: clean

@@ -1,0 +1,71 @@
+diff --git a/usrsctplib/netinet/sctp_os_userspace.h b/usrsctplib/netinet/sctp_os_userspace.h
+index 05f655a..0d71be4 100755
+--- a/usrsctplib/netinet/sctp_os_userspace.h
++++ b/usrsctplib/netinet/sctp_os_userspace.h
+@@ -1001,7 +1001,11 @@ int sctp_userspace_get_mtu_from_ifn(uint32_t if_index);
+ 
+ #define AF_CONN 123
+ struct sockaddr_conn {
+-#ifdef HAVE_SCONN_LEN
++/* __SWITCH__: newlib is BSD-derived (sockaddr has sa_len, usrsctp built with
++ * HAVE_SA_LEN) -- sockaddr_conn MUST carry the leading length byte too, or its
++ * layout disagrees with the generic sa_len address code AND with the public
++ * usrsctp.h definition, corrupting the heap. Keep this in tune with usrsctp.h. */
++#if defined(HAVE_SCONN_LEN) || defined(__SWITCH__)
+ 	uint8_t sconn_len;
+ 	uint8_t sconn_family;
+ #else
+diff --git a/usrsctplib/user_environment.c b/usrsctplib/user_environment.c
+index 3deb3ef..8e41904 100755
+--- a/usrsctplib/user_environment.c
++++ b/usrsctplib/user_environment.c
+@@ -374,6 +374,28 @@ read_random(void *buf, size_t size)
+ 	return;
+ }
+ 
++void
++finish_random(void)
++{
++	return;
++}
++#elif defined(__SWITCH__)
++/* Nintendo Switch (libnx): randomGet() draws from the kernel CSPRNG. */
++void randomGet(void* buf, size_t len);
++
++void
++init_random(void)
++{
++	return;
++}
++
++void
++read_random(void *buf, size_t size)
++{
++	randomGet(buf, size);
++	return;
++}
++
+ void
+ finish_random(void)
+ {
+diff --git a/usrsctplib/usrsctp.h b/usrsctplib/usrsctp.h
+index e0c17c3..6a6ead5 100644
+--- a/usrsctplib/usrsctp.h
++++ b/usrsctplib/usrsctp.h
+@@ -119,8 +119,15 @@ struct sctp_common_header {
+ /* The definition of struct sockaddr_conn MUST be in
+  * tune with other sockaddr_* structures.
+  */
++/* __SWITCH__: devkitA64/libnx newlib is BSD-derived -- struct sockaddr has a
++ * leading sa_len byte (family at offset 1), and usrsctp is compiled with
++ * HAVE_SA_LEN (CMake detects it correctly). sockaddr_conn MUST use the same
++ * with-length layout, otherwise its sconn_family (a bare uint16 at offset 0)
++ * is misread as {sa_len, sa_family} by usrsctp's generic address code,
++ * corrupting the heap during sctp socket/bind/connect. */
+ #if defined(__APPLE__) || defined(__Bitrig__) || defined(__DragonFly__) || \
+-    defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
++    defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
++    defined(__SWITCH__)
+ struct sockaddr_conn {
+ 	uint8_t sconn_len;
+ 	uint8_t sconn_family;

@@ -1,0 +1,23 @@
+# Build artifacts
+build/
+build-switch/
+*.nro
+*.elf
+*.nacp
+*.map
+*.lst
+*.o
+*.d
+
+# Generated shaders (built from shaders/ by make)
+romfs/shaders/
+
+# Cross-compiled WebRTC deps (regenerate with deps/build-switch.sh)
+deps/src/
+deps/switch/
+
+# Reference clients (studied during development)
+references/
+
+# macOS
+.DS_Store
