@@ -226,8 +226,32 @@ void Engine::on_video(uint8_t* data, size_t size, void* user) {
 }
 
 void Engine::on_audio(uint8_t* data, size_t size, void* user) {
+    // Called on the worker thread with peer_mutex_ held. `data` is a whole RTP
+    // packet (rtp_decode_generic forwards header+payload, like the H.264 path).
+    // Parse the header to find the Opus payload and the sequence number, then
+    // hand it straight to the audio thread -- decode happens there, not here, so
+    // audio never waits behind video/RTCP work on this thread.
     auto* self = static_cast<Engine*>(user);
-    self->audio_.play(data, size);
+    if (size < 12) return;
+    uint8_t csrc_count = data[0] & 0x0F;
+    bool has_extension = (data[0] & 0x10) != 0;
+    bool has_padding = (data[0] & 0x20) != 0;
+    uint16_t seq = (static_cast<uint16_t>(data[2]) << 8) | data[3];
+
+    size_t offset = 12 + static_cast<size_t>(csrc_count) * 4;
+    if (has_extension) {
+        if (offset + 4 > size) return;
+        uint16_t ext_words =
+            (static_cast<uint16_t>(data[offset + 2]) << 8) | data[offset + 3];
+        offset += 4 + static_cast<size_t>(ext_words) * 4;
+    }
+    size_t end = size;
+    if (has_padding && end > offset) {
+        uint8_t pad = data[end - 1];
+        if (pad <= end - offset) end -= pad;
+    }
+    if (offset > end) return;
+    self->audio_.submit(seq, data + offset, end - offset);
 }
 
 void Engine::on_channel_message(char* data, size_t size, void* user,
@@ -550,6 +574,10 @@ void Engine::run_peer(GssvSession& session) {
     Uint64 last_keepalive = SDL_GetTicks64();
     Uint64 last_rr = SDL_GetTicks64();
     Uint64 last_consent = SDL_GetTicks64();
+    Uint64 last_audio_stats = SDL_GetTicks64();
+    Uint64 prev_audio_time = SDL_GetTicks64();
+    uint32_t prev_audio_frames = 0;
+    uint32_t prev_audio_out = 0;
     Uint64 idr_wait_start = 0;
     Uint64 last_idr_wait_log = 0;
     Uint64 negotiation_started = SDL_GetTicks64();
@@ -645,6 +673,37 @@ void Engine::run_peer(GssvSession& session) {
                         static_cast<uint32_t>(tier_profile(tier_).bitrate_kbps) *
                             1000u);
                 }
+            }
+        }
+
+        // Audio pipeline telemetry: cumulative counters logged once per second
+        // so a dropout shows up as its cause (loss vs. queue starvation vs.
+        // decode failure) instead of a guess. Only meaningful once streaming.
+        if (now - last_audio_stats > 1000) {
+            auto a = audio_.stats();
+            uint32_t in_hz = (now > prev_audio_time)
+                ? (a.frames - prev_audio_frames) * 1000 / (now - prev_audio_time)
+                : 0;
+            uint32_t out_hz = (now > prev_audio_time)
+                ? (a.out_samples - prev_audio_out) * 1000 / (now - prev_audio_time)
+                : 0;
+            prev_audio_frames = a.frames;
+            prev_audio_out = a.out_samples;
+            prev_audio_time = now;
+            last_audio_stats = now;
+            if (got_frame_) {
+                log("audio| rx=" + std::to_string(a.received) +
+                    " play=" + std::to_string(a.played) +
+                    " fail=" + std::to_string(a.failed) +
+                    " lost=" + std::to_string(a.lost) +
+                    " under=" + std::to_string(a.underruns) +
+                    " drop=" + std::to_string(a.dropped_ms) + "ms" +
+                    " q=" + std::to_string(a.queue_ms) + "ms" +
+                    " in=" + std::to_string(in_hz) + "hz" +
+                    " out=" + std::to_string(out_hz) + "hz" +
+                    " dev=" + std::to_string(audio_.device_hz()) + "hz" +
+                    " ema=" + std::to_string(a.ema_ms) + "ms" +
+                    " adj=" + std::to_string(a.adj_ppm) + "ppm");
             }
         }
 

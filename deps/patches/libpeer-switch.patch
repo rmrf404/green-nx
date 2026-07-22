@@ -540,10 +540,10 @@ index b087893..9f6ee48 100644
  
  void peer_connection_set_local_description(PeerConnection* pc, const char* sdp, SdpType sdp_type);
 diff --git a/src/rtp.c b/src/rtp.c
-index 0a3136a..a145b35 100644
+index 0a3136a..9239e67 100644
 --- a/src/rtp.c
 +++ b/src/rtp.c
-@@ -220,50 +220,15 @@ int rtp_encoder_encode(RtpEncoder* rtp_encoder, const uint8_t* buf, size_t size)
+@@ -220,56 +220,26 @@ int rtp_encoder_encode(RtpEncoder* rtp_encoder, const uint8_t* buf, size_t size)
    return rtp_encoder->encode_func(rtp_encoder, (uint8_t*)buf, size);
  }
  
@@ -602,6 +602,19 @@ index 0a3136a..a145b35 100644
  }
  
  static int rtp_decode_generic(RtpDecoder* rtp_decoder, uint8_t* buf, size_t size) {
+-  RtpPacket* rtp_packet = (RtpPacket*)buf;
++  // Deliver the whole RTP packet (header + payload) to the callback, mirroring
++  // rtp_decode_h264. The caller parses the header itself because it needs the
++  // sequence number to reorder audio packets before decoding: Opus is stateful,
++  // so decoding out of order is audible. The previous behaviour stripped only a
++  // fixed 12-byte header, which threw away the sequence number and mishandled
++  // any CSRC list or header extension.
+   if (rtp_decoder->on_packet != NULL)
+-    rtp_decoder->on_packet(rtp_packet->payload, size - sizeof(RtpHeader), rtp_decoder->user_data);
++    rtp_decoder->on_packet(buf, size, rtp_decoder->user_data);
+   // even if there is no callback set, assume everything is ok for caller and do not return an error
+   return (int)size;
+ }
 diff --git a/src/sctp.h b/src/sctp.h
 index 1116996..4bf9b02 100644
 --- a/src/sctp.h
