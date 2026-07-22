@@ -21,3 +21,6 @@ references/
 
 # macOS
 .DS_Store
+
+# Store-submission assets (kept local)
+promo/
