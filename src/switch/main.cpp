@@ -149,8 +149,15 @@ constexpr int kVibrationLevels = 4;
 Settings load_settings();
 void save_settings(const Settings& settings);
 
+// A tappable footer hint chip: its screen rect and the button key it maps to.
+struct HintHit {
+    SDL_Rect rect;
+    std::string key;
+};
+
 struct App {
     gfx::Gfx gfx;
+    std::vector<HintHit> hint_hits;  // footer chips recorded for touch taps
     std::unique_ptr<Covers> covers;
     std::unique_ptr<XboxAuth> auth;
 
@@ -572,11 +579,13 @@ void draw_hints(App& app, const std::vector<Hint>& hints,
         app.gfx.fill({0, kFooterY, gfx::kWidth, kFooterH}, gfx::kBar);
         app.gfx.fill({0, kFooterY, gfx::kWidth, 2}, gfx::kChip);
     }
+    app.hint_hits.clear();
     int x = gfx::kWidth - kMargin;
     for (auto it = hints.rbegin(); it != hints.rend(); ++it) {
         int lw = app.gfx.text_width(it->label, gfx::FontSize::Small);
         int cw = chip_width(app, it->key);
         x -= cw + 12 + lw;
+        app.hint_hits.push_back({{x, kFooterY, cw + 12 + lw, kFooterH}, it->key});
         int cy = kFooterY + (kFooterH - 40) / 2;
         draw_chip(app, it->key, x, cy, it->primary);
         app.gfx.text(it->label, x + cw + 12, cy + 4, gfx::FontSize::Small,
@@ -1552,17 +1561,37 @@ struct Input {
     bool quit = false;
     bool touch = false;            // a finger tapped this frame
     int touch_x = 0, touch_y = 0;  // tap position in 1920x1080 design space
+    int swipe_rows = 0;            // vertical swipe -> grid rows to scroll
 };
 
 Input poll_input(SDL_Joystick* joystick) {
     Input input;
+    static float s_touch_down_x = 0, s_touch_down_y = 0;
+    static bool s_touching = false;
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_QUIT) input.quit = true;
-        if (event.type == SDL_FINGERDOWN) {  // touchscreen tap -> design space
-            input.touch = true;
-            input.touch_x = static_cast<int>(event.tfinger.x * gfx::kWidth);
-            input.touch_y = static_cast<int>(event.tfinger.y * gfx::kHeight);
+        if (event.type == SDL_FINGERDOWN) {  // remember where the touch began
+            s_touch_down_x = event.tfinger.x;
+            s_touch_down_y = event.tfinger.y;
+            s_touching = true;
+        }
+        if (event.type == SDL_FINGERUP && s_touching) {
+            s_touching = false;
+            int dx = static_cast<int>((event.tfinger.x - s_touch_down_x) *
+                                      gfx::kWidth);
+            int dy = static_cast<int>((event.tfinger.y - s_touch_down_y) *
+                                      gfx::kHeight);
+            int adx = dx < 0 ? -dx : dx;
+            int ady = dy < 0 ? -dy : dy;
+            if (ady > 120 && ady > adx) {  // vertical swipe -> scroll the grid
+                input.swipe_rows = -dy / (kCardH + kGapY);
+                if (input.swipe_rows == 0) input.swipe_rows = dy < 0 ? 1 : -1;
+            } else {  // a tap
+                input.touch = true;
+                input.touch_x = static_cast<int>(event.tfinger.x * gfx::kWidth);
+                input.touch_y = static_cast<int>(event.tfinger.y * gfx::kHeight);
+            }
         }
         if (event.type == SDL_JOYBUTTONDOWN) {
             switch (event.jbutton.button) {
@@ -1676,6 +1705,28 @@ int main(int argc, char** argv) {
     while (running) {
         Input input = poll_input(joystick);
         if (input.quit) break;
+
+        // A tap on the footer hint bar acts as that button press.
+        if (input.touch) {
+            for (const HintHit& h : app.hint_hits) {
+                if (input.touch_x >= h.rect.x &&
+                    input.touch_x <= h.rect.x + h.rect.w &&
+                    input.touch_y >= h.rect.y &&
+                    input.touch_y <= h.rect.y + h.rect.h) {
+                    const std::string& k = h.key;
+                    if (k == "A") input.a = true;
+                    else if (k == "B") input.b = true;
+                    else if (k == "X") input.x = true;
+                    else if (k == "Y") input.y = true;
+                    else if (k == "L") input.l = true;
+                    else if (k == "R") input.r = true;
+                    else if (k == "ZL") input.zl = true;
+                    else if (k == "ZR") input.zr = true;
+                    input.touch = false;  // consumed by the hint bar
+                    break;
+                }
+            }
+        }
 
         switch (app.scene) {
             case Scene::Splash:
@@ -1826,6 +1877,11 @@ int main(int argc, char** argv) {
                     if (step != 0 && !app.visible.empty()) {
                         app.cursor = std::clamp(
                             app.cursor + step, 0,
+                            static_cast<int>(app.visible.size()) - 1);
+                    }
+                    if (input.swipe_rows != 0 && !app.visible.empty()) {
+                        app.cursor = std::clamp(
+                            app.cursor + input.swipe_rows * kColumns, 0,
                             static_cast<int>(app.visible.size()) - 1);
                     }
                     if (input.x && !app.visible.empty()) {  // toggle favorite
