@@ -53,6 +53,10 @@ public:
                     const std::string& locale = "en-US");
     void stop();
 
+    // Output gain applied to decoded audio (forwarded to the AudioPlayer). Set
+    // from the "volume" setting before each stream start; 1.0 = unchanged.
+    void set_audio_gain(float gain) { audio_gain_ = gain; }
+
     EngineState state() const { return state_; }
     std::string status() const;
     std::string error() const;
@@ -129,6 +133,7 @@ private:
     std::string home_server_id_;  // non-empty selects the home (xhome) path
     QualityTier tier_ = QualityTier::P1080HQ;
     std::string locale_ = "en-US";  // streamed console's system language
+    float audio_gain_ = 1.0f;       // forwarded to AudioPlayer::set_gain
 public:
     void log(const std::string& line);  // also used by the libpeer log sink
 

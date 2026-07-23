@@ -160,6 +160,7 @@ void Engine::start_common(const std::string& title_id, QualityTier tier,
     state_ = EngineState::StartingSession;
     video_.init(renderer_);
     audio_.init();
+    audio_.set_gain(audio_gain_);
 #ifdef __SWITCH__
     shared_frame_ = av_frame_alloc();
     present_frame_ = av_frame_alloc();

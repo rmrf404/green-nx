@@ -143,6 +143,20 @@ void AudioPlayer::thread_main() {
                               std::memory_order_relaxed);
             played_.fetch_add(1, std::memory_order_relaxed);
 
+            // Output-volume gain: xCloud/console audio plays quiet at unity, so
+            // lift the decoded PCM before it enters the ring (clamped to the
+            // int16 rails). A cheap per-sample multiply; unity is a no-op.
+            float gain = gain_.load(std::memory_order_relaxed);
+            if (gain != 1.0f) {
+                const int total = samples * kChannels;
+                for (int i = 0; i < total; ++i) {
+                    int v = static_cast<int>(pcm_[i] * gain);
+                    pcm_[i] = v > 32767    ? 32767
+                              : v < -32768 ? -32768
+                                           : static_cast<int16_t>(v);
+                }
+            }
+
             // Steer the servo on smoothed ring depth, then stretch/shrink
             // this frame accordingly before it enters the ring.
             float depth_ms;
