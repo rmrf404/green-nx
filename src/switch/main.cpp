@@ -1151,10 +1151,16 @@ int main(int argc, char** argv) {
 #endif
         }
         if (app.deko_active) {
-            app.engine->pump_video();  // decodes + presents via deko3d
-            // Pace input at ~125 Hz. Without SDL's vsync the loop can spin far
-            // faster than the video rate; sending a gamepad packet every spin
-            // floods the SCTP input channel ("sctp sendv error 11").
+            // pump_video decodes everything queued and presents the freshest
+            // frame on its own ~60 Hz software clock (it does NOT block on the
+            // GPU/vsync -- deko3d's waitIdle only waits for the GPU, and blocking
+            // on acquireImage instead crashed). So this loop must run fast and
+            // yield 1 ms per spin, or it busy-waits at 100% CPU. Presentation
+            // pacing lives entirely in pump_video, decoupled from this loop rate.
+            app.engine->pump_video();
+            // Pace input at ~125 Hz. The loop spins far faster than the video
+            // rate; sending a gamepad packet every spin floods the SCTP input
+            // channel ("sctp sendv error 11").
             Uint32 now = SDL_GetTicks();
             if (now - app.last_input_ms >= 8) {
                 app.engine->send_gamepad(
@@ -1162,7 +1168,7 @@ int main(int argc, char** argv) {
                 apply_rumble(app);
                 app.last_input_ms = now;
             }
-            SDL_Delay(1);  // yield between video frames instead of busy-spinning
+            SDL_Delay(1);  // yield between spins; present cadence is timer-driven
             continue;      // deko3d owns the frame; no SDL pass this iteration
         }
 #endif

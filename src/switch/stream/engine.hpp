@@ -3,6 +3,7 @@
 #include <SDL2/SDL.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <deque>
 #include <memory>
@@ -81,6 +82,7 @@ public:
 
 private:
     void worker();
+    void decode_loop();  // Switch: dedicated H.264 decode thread (see engine.cpp)
     void run_peer(GssvSession& session);
     void set_status(const std::string& status);
     void fail(const std::string& error);
@@ -137,8 +139,19 @@ private:
     VideoJitterBuffer jitter_;  // worker-thread only (RTP -> access units)
     AudioPlayer audio_;
     std::mutex video_mutex_;
+    std::condition_variable video_cv_;  // wakes decode_loop when an AU arrives
     std::deque<std::vector<uint8_t>> video_queue_;
     std::atomic<bool> got_frame_{false};
+
+    // Decoded-frame handoff (Switch): decode_thread_ decodes into shared_frame_;
+    // the render thread (pump_video) takes its own ref into present_frame_ so it
+    // can present zero-copy while the decode thread keeps producing. Two refs of
+    // the same NVTEGRA surface keep it alive across the hand-off.
+    std::thread decode_thread_;
+    std::mutex frame_mutex_;
+    AVFrame* shared_frame_ = nullptr;   // latest decoded (decode thread writes)
+    AVFrame* present_frame_ = nullptr;  // render thread's stable ref
+    bool shared_frame_valid_ = false;
 
     xcloud::InputSerializer input_;
     std::mutex input_mutex_;
@@ -150,6 +163,8 @@ private:
     bool rumble_pending_ = false;
     bool rumble_logged_ = false;  // peer thread only: log the first report once
     Uint64 stream_epoch_ = 0;
+    // Render-thread software vsync pacer for the deko3d present (see pump_video).
+    double next_present_ms_ = 0;
     std::atomic<Uint64> last_keyframe_req_{0};
     std::atomic<uint32_t> pli_sent_{0};  // RTCP PLI keyframe requests
 

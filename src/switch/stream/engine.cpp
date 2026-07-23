@@ -8,6 +8,7 @@
 
 extern "C" {
 #include <peer.h>
+#include <libavutil/frame.h>
 #include <libavutil/log.h>
 }
 
@@ -143,16 +144,29 @@ void Engine::start(const std::string& title_id, QualityTier tier,
     pli_sent_ = 0;
     install_av_log_capture();
     jitter_.reset();
+    next_present_ms_ = 0;  // first frame presents immediately, then paced
     state_ = EngineState::StartingSession;
     video_.init(renderer_);
     audio_.init();
+#ifdef __SWITCH__
+    shared_frame_ = av_frame_alloc();
+    present_frame_ = av_frame_alloc();
+    shared_frame_valid_ = false;
+#endif
     stream_epoch_ = SDL_GetTicks64();
     thread_ = std::thread(&Engine::worker, this);
+#ifdef __SWITCH__
+    // Decode runs on its own thread so hardware-decode latency never delays
+    // input polling or the vsync-paced present on the main thread.
+    decode_thread_ = std::thread(&Engine::decode_loop, this);
+#endif
 }
 
 void Engine::stop() {
     quit_ = true;
+    video_cv_.notify_all();  // wake the decode thread so it can see quit_
     if (thread_.joinable()) thread_.join();
+    if (decode_thread_.joinable()) decode_thread_.join();
     if (g_log_engine == this) {
         gnx_peer_log_set(nullptr);
         g_log_engine = nullptr;
@@ -176,6 +190,16 @@ void Engine::stop() {
         std::lock_guard<std::mutex> lock(video_mutex_);
         video_queue_.clear();
     }
+#ifdef __SWITCH__
+    {
+        // Decode thread is joined; safe to release the hand-off frames (unrefs
+        // any held NVTEGRA surface back to the decoder's pool).
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        if (shared_frame_) av_frame_free(&shared_frame_);
+        if (present_frame_) av_frame_free(&present_frame_);
+        shared_frame_valid_ = false;
+    }
+#endif
     if (state_ != EngineState::Failed) state_ = EngineState::Stopped;
 }
 
@@ -214,10 +238,13 @@ void Engine::on_video(uint8_t* data, size_t size, void* user) {
     self->jitter_.receive(
         data, size, SDL_GetTicks64(),
         [self](const uint8_t* au, size_t au_size) {
-            std::lock_guard<std::mutex> lock(self->video_mutex_);
-            if (self->video_queue_.size() >= kMaxQueuedVideo)
-                self->video_queue_.clear();
-            self->video_queue_.emplace_back(au, au + au_size);
+            {
+                std::lock_guard<std::mutex> lock(self->video_mutex_);
+                if (self->video_queue_.size() >= kMaxQueuedVideo)
+                    self->video_queue_.clear();
+                self->video_queue_.emplace_back(au, au + au_size);
+            }
+            self->video_cv_.notify_one();  // wake the decode thread (Switch)
         },
         [self](uint16_t pid, uint16_t blp) {
             // Retransmit request for lost packets (peer_mutex_ already held).
@@ -796,10 +823,81 @@ void Engine::run_peer(GssvSession& session) {
 
 // ---- render-thread interface ----------------------------------------------
 
+#ifdef __SWITCH__
+// Dedicated decode thread. Pops assembled access units, hardware-decodes each
+// (NVTEGRA), and hands the freshest decoded surface to the render thread through
+// shared_frame_. Decoding here rather than inline in pump_video keeps the main
+// thread free for input and a steady vsync-paced present. Every AU is decoded in
+// order (P-frames reference earlier frames); the render thread just presents
+// whichever frame is latest, so intermediate frames are dropped at present time,
+// never skipped at decode time.
+void Engine::decode_loop() {
+    while (!quit_) {
+        std::vector<uint8_t> unit;
+        {
+            std::unique_lock<std::mutex> lock(video_mutex_);
+            video_cv_.wait_for(lock, std::chrono::milliseconds(20), [this] {
+                return quit_.load() || !video_queue_.empty();
+            });
+            if (quit_) break;
+            if (video_queue_.empty()) continue;
+            unit = std::move(video_queue_.front());
+            video_queue_.pop_front();
+        }
+        if (video_.decode(unit.data(), unit.size())) {
+            {
+                std::lock_guard<std::mutex> lock(frame_mutex_);
+                av_frame_unref(shared_frame_);
+                av_frame_ref(shared_frame_, video_.current_frame());
+                shared_frame_valid_ = true;
+            }
+            if (!got_frame_) {
+                got_frame_ = true;
+                state_ = EngineState::Streaming;
+            }
+        }
+        // Recover from packet loss / corrupt frames with a fresh keyframe
+        // (throttled) instead of staying blocky until the next periodic IDR.
+        if (video_.take_error()) request_keyframe();
+    }
+}
+#endif
+
 SDL_Texture* Engine::pump_video() {
-    // Drain the whole queue each frame: NALUs must be decoded in order and none
-    // dropped. Hardware decode is real-time, so the queue stays near-empty.
-    bool new_frame = false;
+#ifdef __SWITCH__
+    // Present-only: decode_thread_ produces frames. Present the freshest decoded
+    // frame on a STEADY software clock (~59.9 Hz), not once per network frame:
+    //  * Stutter: presenting on network arrival ties the flip cadence to arrival
+    //    jitter, which drifts against the panel's 60 Hz -> periodic judder even
+    //    on a fast link. A steady local clock decouples the two.
+    //  * Green screen: re-presenting the held frame when nothing new decoded
+    //    keeps a static / low-fps scene (e.g. a "syncing save" screen where
+    //    xCloud nearly stops sending) from decaying to an empty surface -- which
+    //    the YUV->RGB shader turns bright green.
+    // The rate is a hair UNDER 60 Hz on purpose: deko3d aborts (acquireImage ->
+    // DkResult_Fail) if we queue frames faster than the compositor drains them.
+    // We take our OWN ref of the shared frame so the decode thread can keep
+    // producing without recycling the surface the GPU is still sampling.
+    constexpr double kPresentIntervalMs = 1000.0 / 59.9;  // ~16.69 ms
+    double now = static_cast<double>(SDL_GetTicks64());
+    if (dk_video_.initialized() && got_frame_ && now >= next_present_ms_) {
+        AVFrame* frame = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(frame_mutex_);
+            if (shared_frame_valid_) {
+                av_frame_unref(present_frame_);
+                if (av_frame_ref(present_frame_, shared_frame_) == 0)
+                    frame = present_frame_;
+            }
+        }
+        if (frame) dk_video_.render(frame);
+        next_present_ms_ += kPresentIntervalMs;
+        if (next_present_ms_ < now) next_present_ms_ = now + kPresentIntervalMs;
+    }
+    return nullptr;
+#else
+    // PC: no decode thread (SDL texture upload must stay on this render thread),
+    // so decode inline and hand back the SDL texture.
     for (;;) {
         std::vector<uint8_t> unit;
         {
@@ -808,25 +906,12 @@ SDL_Texture* Engine::pump_video() {
             unit = std::move(video_queue_.front());
             video_queue_.pop_front();
         }
-        bool rendered = video_.decode(unit.data(), unit.size());
-        if (rendered) new_frame = true;
-        if (rendered && !got_frame_) {
+        if (video_.decode(unit.data(), unit.size()) && !got_frame_) {
             got_frame_ = true;
             state_ = EngineState::Streaming;
         }
     }
-    // Recover from packet loss / corrupt frames by asking for a fresh keyframe
-    // (throttled inside request_keyframe) instead of staying blocky until the
-    // server's next periodic IDR.
     if (video_.take_error()) request_keyframe();
-#ifdef __SWITCH__
-    // Present the newest decoded frame zero-copy through deko3d (once the owner
-    // has handed us the display via begin_deko_output).
-    if (new_frame && dk_video_.initialized())
-        dk_video_.render(video_.current_frame());
-    return nullptr;
-#else
-    (void)new_frame;
     return got_frame_ ? video_.texture() : nullptr;
 #endif
 }

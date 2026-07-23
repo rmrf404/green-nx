@@ -95,6 +95,57 @@ void DkVideoRenderer::logf(const char* fmt, ...) {
     log_(buf);
 }
 
+bool DkVideoRenderer::create_swapchain() {
+    dk::ImageLayout fb_layout;
+    dk::ImageLayoutMaker{dev_}
+        .setFlags(DkImageFlags_UsageRender | DkImageFlags_UsagePresent |
+                  DkImageFlags_HwCompression)
+        .setFormat(DkImageFormat_RGBA8_Unorm)
+        .setDimensions(fb_width_, fb_height_)
+        .initialize(fb_layout);
+    uint32_t fb_size = fb_layout.getSize();
+    uint32_t fb_align = fb_layout.getAlignment();
+    fb_size = (fb_size + fb_align - 1) & ~(fb_align - 1);
+
+    fb_memblock_ = dk::MemBlockMaker{dev_, kFbNum * fb_size}
+                       .setFlags(DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
+                       .create();
+    const DkImage* swap_images[kFbNum];
+    for (unsigned i = 0; i < kFbNum; ++i) {
+        framebuffers_[i].initialize(fb_layout, fb_memblock_, i * fb_size);
+        swap_images[i] = &framebuffers_[i];
+    }
+    swapchain_ = dk::SwapchainMaker{dev_, nwindowGetDefault(), swap_images, kFbNum}
+                     .create();
+    if (!swapchain_) {
+        logf("deko3d: swapchain create failed (window busy?)");
+        return false;
+    }
+    logf("deko3d: swapchain %ux%u (%s), %u fb", fb_width_, fb_height_,
+         fb_mode_ == AppletOperationMode_Console ? "docked" : "handheld", kFbNum);
+    return true;
+}
+
+void DkVideoRenderer::destroy_swapchain() {
+    if (dev_ && queue_) queue_.waitIdle();
+    swapchain_ = nullptr;
+    fb_memblock_ = nullptr;
+}
+
+void DkVideoRenderer::maybe_rebuild_swapchain() {
+    int mode = appletGetOperationMode();
+    if (mode == fb_mode_) return;  // no dock/undock since last check
+    uint32_t w = mode == AppletOperationMode_Console ? 1920 : 1280;
+    uint32_t h = mode == AppletOperationMode_Console ? 1080 : 720;
+    fb_mode_ = mode;
+    if (w == fb_width_ && h == fb_height_) return;  // size unchanged (e.g. 720p dock)
+    logf("deko3d: output mode changed -> rebuilding swapchain %ux%u", w, h);
+    destroy_swapchain();
+    fb_width_ = w;
+    fb_height_ = h;
+    create_swapchain();
+}
+
 bool DkVideoRenderer::init() {
     if (initialized_) return true;
 
@@ -106,34 +157,17 @@ bool DkVideoRenderer::init() {
     queue_ = dk::QueueMaker{dev_}.setFlags(DkQueueFlags_Graphics).create();
     cmdbuf_ = dk::CmdBufMaker{dev_}.create();
 
-    // Framebuffers (RGBA8, 720p) + swapchain on the default window.
-    dk::ImageLayout fb_layout;
-    dk::ImageLayoutMaker{dev_}
-        .setFlags(DkImageFlags_UsageRender | DkImageFlags_UsagePresent |
-                  DkImageFlags_HwCompression)
-        .setFormat(DkImageFormat_RGBA8_Unorm)
-        .setDimensions(kFbWidth, kFbHeight)
-        .initialize(fb_layout);
-    uint32_t fb_size = fb_layout.getSize();
-    uint32_t fb_align = fb_layout.getAlignment();
-    fb_size = (fb_size + fb_align - 1) & ~(fb_align - 1);
-
-    fb_memblock_ = dk::MemBlockMaker{dev_, kFbNum * fb_size}
-                       .setFlags(DkMemBlockFlags_GpuCached |
-                                 DkMemBlockFlags_Image)
-                       .create();
-    const DkImage* swap_images[kFbNum];
-    for (unsigned i = 0; i < kFbNum; ++i) {
-        framebuffers_[i].initialize(fb_layout, fb_memblock_, i * fb_size);
-        swap_images[i] = &framebuffers_[i];
+    // Size the framebuffer to the current output mode (720p handheld / 1080p
+    // docked) and build the swapchain on the default window.
+    fb_mode_ = appletGetOperationMode();
+    if (fb_mode_ == AppletOperationMode_Console) {
+        fb_width_ = 1920;
+        fb_height_ = 1080;
+    } else {
+        fb_width_ = 1280;
+        fb_height_ = 720;
     }
-    swapchain_ = dk::SwapchainMaker{dev_, nwindowGetDefault(), swap_images,
-                                    kFbNum}
-                     .create();
-    if (!swapchain_) {
-        logf("deko3d: swapchain create failed (window busy?)");
-        return false;
-    }
+    if (!create_swapchain()) return false;
 
     // Command + data memory.
     cmd_memblock_ = dk::MemBlockMaker{dev_, kCmdSize}
@@ -193,7 +227,7 @@ bool DkVideoRenderer::init() {
     sampler_desc_ = sdesc;
 
     initialized_ = true;
-    logf("deko3d: initialized (fb %ux%u, %u framebuffers)", kFbWidth, kFbHeight,
+    logf("deko3d: initialized (fb %ux%u, %u framebuffers)", fb_width_, fb_height_,
          kFbNum);
     return true;
 }
@@ -361,6 +395,8 @@ DkVideoRenderer::FrameMapping* DkVideoRenderer::map_frame(AVFrame* frame,
 
 bool DkVideoRenderer::render(AVFrame* frame) {
     if (!initialized_) return false;
+    maybe_rebuild_swapchain();  // follow dock/undock (720p <-> 1080p)
+    if (!swapchain_) return false;
     if (frame->format != AV_PIX_FMT_NVTEGRA) {
         if (!warned_not_hw_) {
             logf("deko3d: frame is not NVTEGRA (fmt=%d) -- cannot zero-copy",
@@ -424,9 +460,9 @@ bool DkVideoRenderer::render(AVFrame* frame) {
 
     dk::ImageView view{framebuffers_[slot]};
     cmdbuf_.bindRenderTargets({&view});
-    cmdbuf_.setViewports(0, {{0.0f, 0.0f, (float)kFbWidth, (float)kFbHeight,
+    cmdbuf_.setViewports(0, {{0.0f, 0.0f, (float)fb_width_, (float)fb_height_,
                               0.0f, 1.0f}});
-    cmdbuf_.setScissors(0, {{0, 0, kFbWidth, kFbHeight}});
+    cmdbuf_.setScissors(0, {{0, 0, fb_width_, fb_height_}});
     cmdbuf_.clearColor(0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
 
     dk::RasterizerState rasterizer;

@@ -42,6 +42,10 @@ bool VideoDecoder::init(SDL_Renderer* renderer) {
                                nullptr, 0) == 0) {
         context_->hw_device_ctx = av_buffer_ref(hw_device_);
         context_->get_format = pick_hw_format;
+        // Headroom so the decoder's surface pool isn't starved by the frames we
+        // hold outside it for zero-copy: the decode thread's held ref + the
+        // shared hand-off frame + the render thread's in-flight present frame.
+        context_->extra_hw_frames = 6;
     } else {
         std::fprintf(stderr, "nvtegra unavailable, software decode\n");
         context_->thread_type = FF_THREAD_SLICE;

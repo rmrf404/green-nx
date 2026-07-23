@@ -49,9 +49,17 @@ public:
     bool initialized() const { return initialized_; }
 
 private:
-    static constexpr unsigned kFbNum = 2;
-    static constexpr uint32_t kFbWidth = 1280;
-    static constexpr uint32_t kFbHeight = 720;
+    // Triple-buffered: with the ~60 Hz software present pacer (Engine::pump_video)
+    // an extra framebuffer gives slack so a bunched present never finds the
+    // swapchain empty (which makes deko3d's acquireImage abort the process).
+    static constexpr unsigned kFbNum = 3;
+    // Framebuffer size tracks the console's output: 720p handheld, 1080p docked.
+    // Rebuilt on dock/undock so a docked TV renders a native 1080p target instead
+    // of a 720p buffer the compositor then upscales. libnx defaults the nwindow
+    // swap interval to 1, so the flip is already vsync-locked / tear-free.
+    uint32_t fb_width_ = 1280;
+    uint32_t fb_height_ = 720;
+    int fb_mode_ = -1;  // AppletOperationMode the current swapchain was built for
 
     struct FrameMapping {
         uint32_t handle = 0;
@@ -67,6 +75,9 @@ private:
     };
 
     void logf(const char* fmt, ...);
+    bool create_swapchain();          // (re)build framebuffers + swapchain
+    void destroy_swapchain();         // waitIdle + release them
+    void maybe_rebuild_swapchain();   // rebuild if the dock mode changed
     // (Re)build the R8/RG8 layouts on the surface's REAL allocated geometry
     // (aligned dims, pitch vs block linear); crop to the visible area in the
     // shader via the transform.
