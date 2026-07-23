@@ -615,10 +615,19 @@ void Engine::run_peer(GssvSession& session) {
     // No b=AS/TIAS lines: working clients don't send them; the bitrate cap is
     // declared via clientdevicecapabilities.maxBitrateKbps instead.
     std::string munged = sdp_force_stereo(offer);  // no-op safety net
-    // 720p tier ships the template verbatim (proven accepted); 1080p tiers
-    // scale the declared decode capability to 1080p60.
-    if (tier_ != QualityTier::P720)
+    bool home = !home_server_id_.empty();
+    if (home) {
+        // Home offer mirrors green-vita (the working reference) exactly:
+        // 720p caps verbatim and H264 level 3.2 (42e020) instead of 3.1 --
+        // the console agent is stricter than the xCloud servers.
+        size_t at = munged.find("profile-level-id=42e01f");
+        if (at != std::string::npos) munged.replace(at + 17, 6, "42e020");
+        log("home offer sdp:\n" + munged);
+    } else if (tier_ != QualityTier::P720) {
+        // 720p tier ships the template verbatim (proven accepted); 1080p
+        // tiers scale the declared decode capability to 1080p60.
         munged = sdp_scale_video_caps_1080(munged);
+    }
     // Pass the answer to libpeer VERBATIM. Never rewrite it: the server has
     // already chosen the codec, and any reserialization risks corrupting the
     // CRLF line endings, which would make libpeer parse the ICE ufrag/pwd with

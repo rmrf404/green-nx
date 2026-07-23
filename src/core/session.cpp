@@ -236,7 +236,23 @@ std::string GssvSession::exchange_sdp(const std::string& offer_sdp) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
-        throw_on_exchange_error(response, "sdp exchange");
+        if (response.contains("errorDetails") &&
+            !response["errorDetails"].is_null()) {
+            // Home consoles have been seen posting an errorDetails object
+            // with all-null fields while the streaming service spins up;
+            // give that a few polls before treating it as a rejection, and
+            // when it IS one, surface the whole response for diagnosis.
+            const json& details = response["errorDetails"];
+            bool all_null = details.is_object();
+            for (const auto& item : details.items())
+                if (!item.value().is_null()) { all_null = false; break; }
+            if (all_null && attempt < 12) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
+            }
+            throw std::runtime_error("sdp exchange: " +
+                                     response.dump().substr(0, 400));
+        }
         std::string exchange = response.value("exchangeResponse", "");
         json parsed = json::parse(exchange, nullptr, false);
         if (parsed.is_discarded() || !parsed.contains("sdp"))
