@@ -143,17 +143,28 @@ void AudioPlayer::thread_main() {
                               std::memory_order_relaxed);
             played_.fetch_add(1, std::memory_order_relaxed);
 
-            // Output-volume gain: xCloud/console audio plays quiet at unity, so
-            // lift the decoded PCM before it enters the ring (clamped to the
-            // int16 rails). A cheap per-sample multiply; unity is a no-op.
+            // Output-volume gain + soft-knee limiter. xCloud/console audio plays
+            // quiet at unity, so we lift it; but a hard clip at high gain
+            // distorts loud passages. Everything below the knee stays perfectly
+            // linear (normal audio is untouched); only peaks above the knee are
+            // compressed smoothly toward full scale, so higher volumes stay
+            // clean instead of clipping. `over/(over+headroom)` maps the
+            // overshoot into the remaining headroom, so |out| never reaches the
+            // rail. A cheap per-sample op; unity gain is a no-op.
             float gain = gain_.load(std::memory_order_relaxed);
             if (gain != 1.0f) {
+                constexpr float kKnee = 24000.0f;               // ~ -2.7 dBFS
+                constexpr float kHeadroom = 32767.0f - kKnee;   // 8767
                 const int total = samples * kChannels;
                 for (int i = 0; i < total; ++i) {
-                    int v = static_cast<int>(pcm_[i] * gain);
-                    pcm_[i] = v > 32767    ? 32767
-                              : v < -32768 ? -32768
-                                           : static_cast<int16_t>(v);
+                    float s = pcm_[i] * gain;
+                    float a = s < 0.0f ? -s : s;
+                    if (a > kKnee) {
+                        float over = a - kKnee;
+                        a = kKnee + kHeadroom * (over / (over + kHeadroom));
+                        s = s < 0.0f ? -a : a;
+                    }
+                    pcm_[i] = static_cast<int16_t>(s);
                 }
             }
 
