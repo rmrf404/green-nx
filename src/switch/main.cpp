@@ -1550,6 +1550,8 @@ struct Input {
     bool plus = false, minus = false, zl = false, zr = false;
     bool l = false, r = false;
     bool quit = false;
+    bool touch = false;            // a finger tapped this frame
+    int touch_x = 0, touch_y = 0;  // tap position in 1920x1080 design space
 };
 
 Input poll_input(SDL_Joystick* joystick) {
@@ -1557,6 +1559,11 @@ Input poll_input(SDL_Joystick* joystick) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_QUIT) input.quit = true;
+        if (event.type == SDL_FINGERDOWN) {  // touchscreen tap -> design space
+            input.touch = true;
+            input.touch_x = static_cast<int>(event.tfinger.x * gfx::kWidth);
+            input.touch_y = static_cast<int>(event.tfinger.y * gfx::kHeight);
+        }
         if (event.type == SDL_JOYBUTTONDOWN) {
             switch (event.jbutton.button) {
                 case kBtnA: input.a = true; break;
@@ -1732,6 +1739,57 @@ int main(int argc, char** argv) {
             case Scene::Library: {
                 int tabs = app.consoles.empty() ? 3 : kTabCount;
                 bool console_tab = app.tab == LibraryTab::Consoles;
+
+                // Touch: tap a tab to switch, or a card to select + open it,
+                // reusing the A path (input.a) below. Design-space coords.
+                if (input.touch) {
+                    if (input.touch_y >= 116 && input.touch_y <= 190) {
+                        int tx = kGridX + chip_width(app, "L") + 44;
+                        for (int t = 0; t < tabs; ++t) {
+                            int w = app.gfx.text_width(kTabNames[t],
+                                                       gfx::FontSize::Body);
+                            if (input.touch_x >= tx - 16 &&
+                                input.touch_x <= tx + w + 16) {
+                                app.tab = static_cast<LibraryTab>(t);
+                                app.cursor = 0;
+                                apply_filter(app);
+                                break;
+                            }
+                            tx += w + 44;
+                        }
+                    } else if (console_tab) {
+                        int cx = input.touch_x - kGridX;
+                        int cy = input.touch_y - 300;
+                        if (cx >= 0 && cy >= 0 && cy < 380) {
+                            int i = cx / (560 + 56);
+                            if (i < static_cast<int>(app.consoles.size()) &&
+                                i < 3 && cx - i * (560 + 56) < 560) {
+                                app.console_cursor = i;
+                                input.a = true;
+                            }
+                        }
+                    } else {
+                        int gx = input.touch_x - kGridX;
+                        int gy = input.touch_y - kGridY;
+                        if (gx >= 0 && gy >= 0) {
+                            int col = gx / (kCardW + kGapX);
+                            int row = gy / (kCardH + kGapY);
+                            if (col < kColumns &&
+                                gx - col * (kCardW + kGapX) < kCardW &&
+                                gy - row * (kCardH + kGapY) < kCardH) {
+                                int first_row = std::max(
+                                    0, app.cursor / kColumns - (kRowsVisible - 1));
+                                int index = (first_row + row) * kColumns + col;
+                                if (index >= 0 &&
+                                    index <
+                                        static_cast<int>(app.visible.size())) {
+                                    app.cursor = index;
+                                    input.a = true;
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if (input.l || input.r) {  // switch tab
                     int t = (static_cast<int>(app.tab) + (input.r ? 1 : -1) +
