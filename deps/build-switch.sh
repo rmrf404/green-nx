@@ -73,11 +73,27 @@ if [[ "${1:-}" == "--inside" ]]; then
     "-I$PREFIX/include" "-I$SHIM" -DLOG_REDIRECT=1 -DLOG_LEVEL=2 -- \
     -DDISABLE_PEER_SIGNALING=ON -DCMAKE_PREFIX_PATH="$PREFIX"
 
-  # 5) Link smoke test: catches unresolved symbols early.
+  # 5) Link smoke test: catches unresolved symbols early. The deps are built
+  #    expecting a handful of APP-provided symbols (the real implementations
+  #    live in src/switch/stream/switch_compat.c, which isn't visible in this
+  #    container -- only deps/ is mounted). Stub them here so the smoke test
+  #    checks exactly what it should: that the deps' OWN symbols all resolve.
   echo "=== smoke test link"
   cat > /tmp/smoketest.c <<'EOF'
 #include <peer.h>
 #include <peer_connection.h>
+#include <stddef.h>
+
+/* App-side contract stubs (see src/switch/stream/switch_compat.c). */
+struct ifaddrs;
+void peer_log(char* lvl, const char* file, int line, const char* fmt, ...) {}
+int getifaddrs(struct ifaddrs** ifap) { return -1; }
+void freeifaddrs(struct ifaddrs* ifa) {}
+unsigned int if_nametoindex(const char* ifname) { return 0; }
+char* if_indextoname(unsigned int ifindex, char* ifname) { return 0; }
+int mbedtls_hardware_poll(void* data, unsigned char* output, size_t len,
+                          size_t* olen) { return 0; }
+
 int main(void) {
   peer_init();
   PeerConfiguration config = {0};

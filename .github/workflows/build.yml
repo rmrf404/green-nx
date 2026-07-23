@@ -1,0 +1,29 @@
+# Clean-clone build of green-nx: WebRTC deps + the .nro, exactly as a
+# contributor would build them. Catches works-only-on-one-machine breakage
+# (missing files, unresolved symbols) before it lands on main.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  switch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build WebRTC deps (libpeer/srtp/usrsctp/mbedtls)
+        run: bash deps/build-switch.sh
+
+      - name: Build green-nx.nro
+        run: docker run --rm -v "$PWD":/src -w /src devkitpro/devkita64 make
+
+      - name: Verify artifact
+        run: ls -l green-nx.nro
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: green-nx-nro
+          path: green-nx.nro
