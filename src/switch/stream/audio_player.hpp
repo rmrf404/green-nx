@@ -43,6 +43,10 @@ public:
 
     int device_hz() const { return device_hz_; }
 
+    // Output volume multiplier applied to decoded PCM (1.0 = unchanged). Safe to
+    // call from any thread; the decode thread reads it per frame.
+    void set_gain(float gain) { gain_.store(gain, std::memory_order_relaxed); }
+
     // Diagnostic telemetry (cumulative unless noted).
     struct Stats {
         uint32_t received = 0;     // packets handed to submit()
@@ -74,6 +78,7 @@ private:
 
     OpusDecoder* decoder_ = nullptr;
     int device_hz_ = 0;
+    std::atomic<float> gain_{1.0f};  // output volume multiplier (set_gain)
     bool audout_up_ = false;
     void* out_mem_[kNumOutBufs] = {};
     AudioOutBuffer out_bufs_[kNumOutBufs] = {};
