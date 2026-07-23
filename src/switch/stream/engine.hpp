@@ -53,6 +53,11 @@ public:
                     const std::string& locale = "en-US");
     void stop();
 
+    // Present a freshly decoded frame ASAP (rate-limited to the panel) instead
+    // of on the steady clock -- lower latency, slightly less smooth. Set before
+    // start(); default false.
+    void set_low_latency(bool enabled) { low_latency_ = enabled; }
+
     EngineState state() const { return state_; }
     std::string status() const;
     std::string error() const;
@@ -176,6 +181,9 @@ private:
     Uint64 stream_epoch_ = 0;
     // Render-thread software vsync pacer for the deko3d present (see pump_video).
     double next_present_ms_ = 0;
+    double last_present_ms_ = 0;            // low-latency mode: last present time
+    bool low_latency_ = false;              // present-on-decode vs steady clock
+    std::atomic<bool> frame_ready_{false};  // decode thread -> render: new frame
     std::atomic<Uint64> last_keyframe_req_{0};
     std::atomic<uint32_t> pli_sent_{0};  // RTCP PLI keyframe requests
 

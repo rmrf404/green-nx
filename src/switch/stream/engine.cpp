@@ -990,6 +990,7 @@ void Engine::decode_loop() {
                 av_frame_ref(shared_frame_, video_.current_frame());
                 shared_frame_valid_ = true;
             }
+            frame_ready_.store(true, std::memory_order_relaxed);
             if (!got_frame_) {
                 got_frame_ = true;
                 state_ = EngineState::Streaming;
@@ -1019,7 +1020,15 @@ SDL_Texture* Engine::pump_video() {
     // producing without recycling the surface the GPU is still sampling.
     constexpr double kPresentIntervalMs = 1000.0 / 59.9;  // ~16.69 ms
     double now = static_cast<double>(SDL_GetTicks64());
-    if (dk_video_.initialized() && got_frame_ && now >= next_present_ms_) {
+    // Low-latency mode presents a freshly decoded frame immediately instead of
+    // waiting for the next steady tick (shaves up to ~1 frame of lag), but never
+    // faster than the panel -- deko3d aborts if we outrun the compositor. The
+    // trade is a slightly less even cadence (arrival jitter no longer smoothed).
+    bool due = low_latency_
+                   ? (frame_ready_.load(std::memory_order_relaxed) &&
+                      now - last_present_ms_ >= kPresentIntervalMs)
+                   : (now >= next_present_ms_);
+    if (dk_video_.initialized() && got_frame_ && due) {
         AVFrame* frame = nullptr;
         {
             std::lock_guard<std::mutex> lock(frame_mutex_);
@@ -1030,8 +1039,13 @@ SDL_Texture* Engine::pump_video() {
             }
         }
         if (frame) dk_video_.render(frame);
-        next_present_ms_ += kPresentIntervalMs;
-        if (next_present_ms_ < now) next_present_ms_ = now + kPresentIntervalMs;
+        if (low_latency_) {
+            frame_ready_.store(false, std::memory_order_relaxed);
+            last_present_ms_ = now;
+        } else {
+            next_present_ms_ += kPresentIntervalMs;
+            if (next_present_ms_ < now) next_present_ms_ = now + kPresentIntervalMs;
+        }
     }
     return nullptr;
 #else

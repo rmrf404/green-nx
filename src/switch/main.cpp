@@ -135,7 +135,7 @@ struct SwitchRumble {
 #endif
 
 struct Settings {
-    int quality = 2;    // 0=720p, 1=1080p, 2=1080p HQ
+    int quality = 1;    // 0=720p, 1=1080p, 2=1080p low-latency
     int mapping = 0;    // 0=positional, 1=match labels
     int vibration = 2;  // rumble intensity: 0=Off, 1=Low, 2=Medium, 3=High
     int region = 0;     // region-bypass IP: 0=Off, else index into kRegion*
@@ -209,7 +209,7 @@ Settings load_settings() {
     if (!in) return settings;
     json data = json::parse(in, nullptr, false);
     if (data.is_discarded()) return settings;
-    settings.quality = std::clamp(data.value("quality", 2), 0, 2);
+    settings.quality = std::clamp(data.value("quality", 1), 0, 2);
     settings.mapping = std::clamp(data.value("mapping", 0), 0, 1);
     // "vibration" was an on/off bool before intensity levels existed; migrate.
     if (data.contains("vibration") && data["vibration"].is_boolean())
@@ -767,7 +767,7 @@ constexpr int kRowsVisible = 2;
 const char* kTabNames[kTabCount] = {"All games", "Favorites", "History",
                                     "Consoles"};
 
-const char* kQualityLabels[3] = {"720p", "1080p", "1080p high bitrate"};
+const char* kQualityLabels[3] = {"720p", "1080p", "1080p low-latency"};
 const char* kMappingLabels[2] = {"Positional (Switch A = Xbox B)",
                                  "Match labels (Switch A = Xbox A)"};
 
@@ -787,8 +787,12 @@ std::string console_label(const App& app) {
 void launch_stream(App& app, bool home) {
     app.launching_home = home && !app.consoles.empty();
 #ifdef GNX_NATIVE_STREAM
-    QualityTier tier = static_cast<QualityTier>(app.settings.quality);
+    // 720p / 1080p / "1080p low-latency": the last two both stream 1080p; the
+    // low-latency variant just flips the present pacing (no separate tier).
+    QualityTier tier = app.settings.quality == 0 ? QualityTier::P720
+                                                 : QualityTier::P1080;
     const char* locale = kLanguageCodes[app.settings.language];
+    app.engine->set_low_latency(app.settings.quality == 2);
     if (app.launching_home)
         app.engine->start_home(selected_console(app).server_id, tier, locale);
     else
@@ -1247,8 +1251,8 @@ void draw_settings(App& app) {
             line2 = "an in-game language menu. Takes effect on next launch.";
             break;
         default:
-            line1 = "Higher quality needs a stronger connection — 5 GHz";
-            line2 = "Wi-Fi or docked LAN is recommended for high bitrate.";
+            line1 = "720p or 1080p. \"1080p low-latency\" shows frames the";
+            line2 = "instant they decode: less lag, a touch less smooth.";
             break;
     }
     SDL_Rect note = {120, 820, gfx::kWidth - 240, 120};
