@@ -1239,6 +1239,7 @@ bool Engine::begin_deko_output() {
 #ifdef __SWITCH__
     dk_video_.set_logger([this](const char* m) { log(std::string(m)); });
     dk_video_.set_sharpness(sharpness_);
+    dk_video_.set_hud_enabled(debug_hud_);
     bool ok = dk_video_.init();
     log(ok ? "deko3d output started" : "deko3d output FAILED to start");
     return ok;

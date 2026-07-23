@@ -521,20 +521,24 @@ bool DkVideoRenderer::render(AVFrame* frame) {
     // --- HUD overlay pass (stage 0): a semi-transparent panel alpha-blended
     // over the video, top-left. Reuses the video vertex shader; hud_fsh_ fills
     // the panel. Stage 1 will sample a rasterized-text texture here instead.
-    dk::BlendState hud_blend;
-    hud_blend.setColorBlendOp(DkBlendOp_Add);
-    hud_blend.setSrcColorBlendFactor(DkBlendFactor_SrcAlpha);
-    hud_blend.setDstColorBlendFactor(DkBlendFactor_InvSrcAlpha);
-    hud_blend.setAlphaBlendOp(DkBlendOp_Add);
-    hud_blend.setSrcAlphaBlendFactor(DkBlendFactor_One);
-    hud_blend.setDstAlphaBlendFactor(DkBlendFactor_InvSrcAlpha);
-    dk::ColorState hud_color;
-    hud_color.setBlendEnable(0, true);
-    cmdbuf_.bindBlendStates(0, {hud_blend});
-    cmdbuf_.bindColorState(hud_color);
-    cmdbuf_.bindShaders(DkStageFlag_GraphicsMask, {&vertex_shader_, &hud_fsh_});
-    cmdbuf_.bindVtxBuffer(0, data_gpu_ + kHudVtxOff, sizeof(kHudQuad));
-    cmdbuf_.draw(DkPrimitive_Quads, 4, 1, 0, 0);
+    // Gated by the "Debug HUD" setting.
+    if (hud_enabled_) {
+        dk::BlendState hud_blend;
+        hud_blend.setColorBlendOp(DkBlendOp_Add);
+        hud_blend.setSrcColorBlendFactor(DkBlendFactor_SrcAlpha);
+        hud_blend.setDstColorBlendFactor(DkBlendFactor_InvSrcAlpha);
+        hud_blend.setAlphaBlendOp(DkBlendOp_Add);
+        hud_blend.setSrcAlphaBlendFactor(DkBlendFactor_One);
+        hud_blend.setDstAlphaBlendFactor(DkBlendFactor_InvSrcAlpha);
+        dk::ColorState hud_color;
+        hud_color.setBlendEnable(0, true);
+        cmdbuf_.bindBlendStates(0, {hud_blend});
+        cmdbuf_.bindColorState(hud_color);
+        cmdbuf_.bindShaders(DkStageFlag_GraphicsMask,
+                            {&vertex_shader_, &hud_fsh_});
+        cmdbuf_.bindVtxBuffer(0, data_gpu_ + kHudVtxOff, sizeof(kHudQuad));
+        cmdbuf_.draw(DkPrimitive_Quads, 4, 1, 0, 0);
+    }
 
     queue_.submitCommands(cmdbuf_.finishList());
     queue_.presentImage(swapchain_, slot);

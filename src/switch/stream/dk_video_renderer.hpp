@@ -43,6 +43,9 @@ public:
         sharpness_ = level < 0 ? 0 : (level > 3 ? 3 : level);
     }
 
+    // Enable/disable the debug HUD overlay pass (drawn on top of the video).
+    void set_hud_enabled(bool e) { hud_enabled_ = e; }
+
     // Bring up the deko3d device/swapchain. Call after SDL has released the
     // window. Returns false (and logs) on failure.
     bool init();
@@ -138,6 +141,7 @@ private:
     bool color_full_ = false;
     bool warned_not_hw_ = false;
     bool logged_surface_ = false;
+    bool hud_enabled_ = true;  // draw the debug HUD overlay pass
 };
 
 }  // namespace gnx::stream

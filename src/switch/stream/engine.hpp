@@ -73,6 +73,9 @@ public:
     // renderer. Set from the "sharpness" setting before each stream start.
     void set_sharpness(int level) { sharpness_ = level; }
 
+    // Draw the on-screen debug HUD overlay while streaming. Set before start().
+    void set_debug_hud(bool enabled) { debug_hud_ = enabled; }
+
     EngineState state() const { return state_; }
     std::string status() const;
     std::string error() const;
@@ -229,6 +232,7 @@ private:
     // pump_video), in SDL performance-counter ticks: millisecond deadlines
     // quantized to an uneven 16/17 ms grid; the counter keeps the fraction.
     double next_present_counter_ = 0;
+    bool debug_hud_ = true;                 // draw the debug HUD overlay
     std::atomic<Uint64> last_keyframe_req_{0};
     std::atomic<uint32_t> pli_sent_{0};  // RTCP PLI keyframe requests
 
