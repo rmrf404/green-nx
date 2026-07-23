@@ -502,34 +502,63 @@ void Engine::worker() {
         GssvSession::cleanup_stale_sessions(http_, cloud_,
                                             home ? "home" : "cloud");
 
-        set_status("Requesting a session...");
-        GssvSession session(http_, cloud_, tier_, locale_);
-        if (home)
-            session.start_home(home_server_id_);
-        else
-            session.start_cloud(title_id_);
+        // Home streaming: a session request against a sleeping console acts
+        // as the wake-up call but fails with AgentCommandError while the
+        // console boots its streaming service (same behaviour Greenlight
+        // sees). Retry a few times before surfacing the failure.
+        int attempts = home ? 4 : 1;
+        for (int attempt = 0; attempt < attempts && !quit_; ++attempt) {
+            if (attempt > 0) {
+                set_status("Waking your console... (attempt " +
+                           std::to_string(attempt + 1) + " of " +
+                           std::to_string(attempts) + ")");
+                for (int i = 0; i < 50 && !quit_; ++i)  // ~5 s between tries
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(100));
+                if (quit_) break;
+            }
+            set_status("Requesting a session...");
+            GssvSession session(http_, cloud_, tier_, locale_);
+            if (home)
+                session.start_home(home_server_id_);
+            else
+                session.start_cloud(title_id_);
 
-        set_status("Waiting for a server...");
-        bool connected = false;
-        for (int i = 0; i < 300 && !quit_; ++i) {
-            SessionState state = session.refresh_state();
-            if (state == SessionState::ReadyToConnect && !connected) {
-                set_status("Authenticating...");
-                session.connect(auth_.fetch_passport_token());
-                connected = true;
-            } else if (state == SessionState::Provisioned) {
-                run_peer(session);
-                session.stop();
-                return;
-            } else if (state == SessionState::Failed) {
-                fail("Session failed: " + session.error_details());
-                session.stop();
+            set_status("Waiting for a server...");
+            bool connected = false;
+            std::string session_error;
+            for (int i = 0; i < 300 && !quit_; ++i) {
+                SessionState state = session.refresh_state();
+                if (state == SessionState::ReadyToConnect && !connected) {
+                    set_status("Authenticating...");
+                    session.connect(auth_.fetch_passport_token());
+                    connected = true;
+                } else if (state == SessionState::Provisioned) {
+                    run_peer(session);
+                    session.stop();
+                    return;
+                } else if (state == SessionState::Failed) {
+                    session_error = session.error_details();
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(700));
+            }
+            session.stop();
+            if (quit_) return;
+            bool agent_error =
+                session_error.find("AgentCommandError") != std::string::npos;
+            if (session_error.empty()) {
+                fail("Timed out waiting for a session");
                 return;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(700));
+            log("session attempt " + std::to_string(attempt + 1) +
+                " failed: " + session_error);
+            if (!agent_error || attempt == attempts - 1) {
+                fail("Session failed: " + session_error);
+                return;
+            }
+            // AgentCommandError on home: console still waking -> retry.
         }
-        session.stop();
-        if (!quit_) fail("Timed out waiting for a session");
     } catch (const std::exception& error) {
         fail(error.what());
     }

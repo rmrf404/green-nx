@@ -60,8 +60,8 @@ enum class Scene {
     Stream, Fatal
 };
 
-enum class LibraryTab { All, Favorites, History };
-constexpr int kTabCount = 3;
+enum class LibraryTab { All, Favorites, History, Consoles };
+constexpr int kTabCount = 4;  // Consoles only shows with a linked console
 constexpr int kHistoryMax = 10;  // recently-played games kept
 
 #ifdef __SWITCH__
@@ -500,7 +500,9 @@ void apply_filter(App& app) {
                lowercase(game.title_id).find(needle) != std::string::npos;
     };
 
-    if (app.tab == LibraryTab::History) {
+    if (app.tab == LibraryTab::Consoles) {
+        return;  // the Consoles tab lists consoles, not games
+    } else if (app.tab == LibraryTab::History) {
         for (const std::string& id : app.history) {
             int i = find_game(app, id);
             if (i >= 0 && matches(app.games[i])) app.visible.push_back(i);
@@ -761,7 +763,8 @@ constexpr int kGridX = 170;
 constexpr int kGridY = 220;
 constexpr int kRowsVisible = 2;
 
-const char* kTabNames[kTabCount] = {"All games", "Favorites", "History"};
+const char* kTabNames[kTabCount] = {"All games", "Favorites", "History",
+                                    "Consoles"};
 
 const char* kQualityLabels[3] = {"720p", "1080p", "1080p high bitrate"};
 const char* kMappingLabels[2] = {"Positional (Switch A = Xbox B)",
@@ -891,21 +894,8 @@ void draw_library(App& app) {
                      gfx::kText);
     }
 
-    // Source = Your Xbox: the library IS your consoles — pick one to stream.
-    if (app.settings.source == 2 && !app.consoles.empty()) {
-        std::string info =
-            std::to_string(app.consoles.size()) +
-            (app.consoles.size() == 1 ? " console" : " consoles");
-        app.gfx.text(info,
-                     gfx::kWidth - kGridX -
-                         app.gfx.text_width(info, gfx::FontSize::Small),
-                     138, gfx::FontSize::Small, gfx::kFaint);
-        app.gfx.text("Your consoles", kGridX, 124, gfx::FontSize::Body,
-                     gfx::kText);
-        app.gfx.fill({kGridX, 176, app.gfx.text_width("Your consoles",
-                                                      gfx::FontSize::Body),
-                      5}, gfx::kAccent);
-
+    // Consoles tab: one card per linked Xbox — pick one to stream.
+    auto draw_console_cards = [&app]() {
         for (int i = 0; i < static_cast<int>(app.consoles.size()) && i < 3;
              ++i) {
             const HomeConsole& console = app.consoles[i];
@@ -933,20 +923,15 @@ void draw_library(App& app) {
                          gfx::kTextDim);
             if (focused) draw_focus_frames(app, card);
         }
-        draw_hints(app, {{"A", "Connect", true},
-                         {"ZR", "Refresh"},
-                         {"ZL", "Settings"},
-                         {"−", "Sign out"},
-                         {"+", "Exit"}});
-        return;
-    }
+    };
 
     // Row 2: navigation — L/R chips hugging the tabs (the hint lives where it
     // acts), active tab kText + 5px accent underline, idle tabs kFaint.
     int tx = kGridX;
     draw_chip(app, "L", tx, 128, false);
     tx += chip_width(app, "L") + 44;
-    for (int t = 0; t < kTabCount; ++t) {
+    int tabs = app.consoles.empty() ? 3 : kTabCount;
+    for (int t = 0; t < tabs; ++t) {
         bool active = static_cast<int>(app.tab) == t;
         int w = app.gfx.text(kTabNames[t], tx, 124, gfx::FontSize::Body,
                              active ? gfx::kText : gfx::kFaint);
@@ -954,6 +939,24 @@ void draw_library(App& app) {
         tx += w + 44;
     }
     draw_chip(app, "R", tx, 128, false);
+
+    if (app.tab == LibraryTab::Consoles) {
+        std::string info =
+            std::to_string(app.consoles.size()) +
+            (app.consoles.size() == 1 ? " console" : " consoles");
+        app.gfx.text(info,
+                     gfx::kWidth - kGridX -
+                         app.gfx.text_width(info, gfx::FontSize::Small),
+                     138, gfx::FontSize::Small, gfx::kFaint);
+        draw_console_cards();
+        draw_hints(app, {{"A", "Connect", true},
+                         {"L R", "Tabs"},
+                         {"ZR", "Refresh"},
+                         {"ZL", "Settings"},
+                         {"−", "Sign out"},
+                         {"+", "Exit"}});
+        return;
+    }
 
     std::string info = std::to_string(app.visible.size()) + " games";
     if (!app.query.empty()) info += "  ·  \"" + app.query + "\"";
@@ -1677,6 +1680,10 @@ int main(int argc, char** argv) {
             case Scene::LoadingLibrary:
                 if (app.load_state == 1) {
                     join_worker(app);
+                    // Preferred source = your Xbox: land on the Consoles tab
+                    // (games stay one L-press away).
+                    if (app.settings.source == 2 && !app.consoles.empty())
+                        app.tab = LibraryTab::Consoles;
                     apply_filter(app);
                     app.scene = Scene::Library;
                     try {
@@ -1690,9 +1697,19 @@ int main(int argc, char** argv) {
                 break;
 
             case Scene::Library: {
-                // Console view (source = Your Xbox): the grid is replaced by
-                // your linked consoles; A connects to the selected one.
-                if (app.settings.source == 2 && !app.consoles.empty()) {
+                int tabs = app.consoles.empty() ? 3 : kTabCount;
+                bool console_tab = app.tab == LibraryTab::Consoles;
+
+                if (input.l || input.r) {  // switch tab
+                    int t = (static_cast<int>(app.tab) + (input.r ? 1 : -1) +
+                             tabs) % tabs;
+                    app.tab = static_cast<LibraryTab>(t);
+                    app.cursor = 0;
+                    apply_filter(app);
+                    break;
+                }
+
+                if (console_tab) {
                     int last = static_cast<int>(app.consoles.size()) - 1;
                     if (input.left)
                         app.console_cursor =
@@ -1700,7 +1717,7 @@ int main(int argc, char** argv) {
                     if (input.right)
                         app.console_cursor =
                             std::min(last, app.console_cursor + 1);
-                    if (input.a) {
+                    if (input.a && last >= 0) {
                         const HomeConsole& console = selected_console(app);
                         app.launch_game = Game{};
                         app.launch_game.title_id = console.server_id;
@@ -1709,51 +1726,26 @@ int main(int argc, char** argv) {
                                                    : console.name;
                         launch_stream(app, true);
                     }
-                    if (input.zr) {
-                        app.scene = Scene::LoadingLibrary;
-                        start_library_load(app, true);
+                } else {
+                    int step = 0;
+                    if (input.right) step = 1;
+                    if (input.left) step = -1;
+                    if (input.down) step = kColumns;
+                    if (input.up) step = -kColumns;
+                    if (step != 0 && !app.visible.empty()) {
+                        app.cursor = std::clamp(
+                            app.cursor + step, 0,
+                            static_cast<int>(app.visible.size()) - 1);
                     }
-                    if (input.zl) {
-                        app.settings_return = Scene::Library;
-                        app.scene = Scene::Settings;
+                    if (input.x && !app.visible.empty()) {  // toggle favorite
+                        toggle_favorite(
+                            app, app.games[app.visible[app.cursor]].title_id);
+                        apply_filter(app);  // Favorites tab updates live
                     }
-                    if (input.minus) {
-                        app.auth->logout();
-                        std::remove(data_path("games.json").c_str());
-                        app.games.clear();
-                        app.visible.clear();
-                        app.scene = Scene::SignIn;
-                        start_signin(app);
+                    if (input.y) {
+                        app.query = keyboard_input(app.query);
+                        apply_filter(app);
                     }
-                    if (input.plus) running = false;
-                    break;
-                }
-
-                int step = 0;
-                if (input.right) step = 1;
-                if (input.left) step = -1;
-                if (input.down) step = kColumns;
-                if (input.up) step = -kColumns;
-                if (step != 0 && !app.visible.empty()) {
-                    app.cursor = std::clamp(
-                        app.cursor + step, 0,
-                        static_cast<int>(app.visible.size()) - 1);
-                }
-                if (input.l || input.r) {  // switch tab
-                    int t = (static_cast<int>(app.tab) + (input.r ? 1 : -1) +
-                             kTabCount) % kTabCount;
-                    app.tab = static_cast<LibraryTab>(t);
-                    app.cursor = 0;
-                    apply_filter(app);
-                }
-                if (input.x && !app.visible.empty()) {  // toggle favorite
-                    toggle_favorite(
-                        app, app.games[app.visible[app.cursor]].title_id);
-                    apply_filter(app);  // Favorites tab updates live
-                }
-                if (input.y) {
-                    app.query = keyboard_input(app.query);
-                    apply_filter(app);
                 }
                 if (input.zr) {  // refresh library from Xbox
                     app.scene = Scene::LoadingLibrary;
