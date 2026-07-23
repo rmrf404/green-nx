@@ -58,10 +58,90 @@ enum class Scene {
     Splash, SignIn, LoadingLibrary, Library, Settings, Stream, Fatal
 };
 
-struct Settings {
-    int quality = 2;  // 0=720p, 1=1080p, 2=1080p HQ
-    int mapping = 0;  // 0=positional, 1=match labels
+enum class LibraryTab { All, Favorites, History };
+constexpr int kTabCount = 3;
+constexpr int kHistoryMax = 10;  // recently-played games kept
+
+#ifdef __SWITCH__
+// HD-rumble driven straight through libnx. We can't use SDL_JoystickRumble: the
+// devkitPro SDL port only initializes vibration handles for HidNpadIdType_No1
+// (player 1), never HidNpadIdType_Handheld -- so in handheld mode the send goes
+// to a slot with no motor and nothing happens. We instead init both targets
+// (two actuators each: left + right) and send to whichever npad is active.
+// Unlike SDL, libnx vibration is set-and-hold, so we stop it ourselves once the
+// server report's duration elapses (tick()).
+struct SwitchRumble {
+    HidVibrationDeviceHandle handheld_[2] = {};
+    HidVibrationDeviceHandle player1_[2] = {};
+    bool ready_ = false;
+    bool active_ = false;
+    Uint32 expiry_ = 0;
+
+    void init() {
+        Result r1 = hidInitializeVibrationDevices(
+            handheld_, 2, HidNpadIdType_Handheld, HidNpadStyleTag_NpadHandheld);
+        Result r2 = hidInitializeVibrationDevices(
+            player1_, 2, HidNpadIdType_No1, HidNpadStyleSet_NpadFullCtrl);
+        ready_ = R_SUCCEEDED(r1) && R_SUCCEEDED(r2);
+    }
+
+    // Handheld mode -> built-in rails; otherwise the player-1 controller.
+    const HidVibrationDeviceHandle* target() const {
+        if (hidGetNpadStyleSet(HidNpadIdType_Handheld) &
+            HidNpadStyleTag_NpadHandheld)
+            return handheld_;
+        return player1_;
+    }
+
+    void send(float low, float high) {
+        auto clamp01 = [](float v) { return v < 0 ? 0.f : (v > 1 ? 1.f : v); };
+        HidVibrationValue v[2];
+        v[0].amp_low = clamp01(low);
+        v[0].freq_low = 160.0f;     // HD-rumble low-band centre
+        v[0].amp_high = clamp01(high);
+        v[0].freq_high = 320.0f;    // HD-rumble high-band centre
+        v[1] = v[0];                // both actuators together
+        hidSendVibrationValues(target(), v, 2);
+    }
+
+    // Start a burst scaled by the user's intensity gain; auto-stops after
+    // duration_ms (floored so a 0-length report is still felt, and the server
+    // re-sends to sustain longer effects). The high band gets an extra trim --
+    // it is inherently louder/harsher and is what you hear humming.
+    void play(float low, float high, float gain, Uint32 duration_ms,
+              Uint32 now) {
+        if (!ready_) return;
+        float lo = low * gain;
+        float hi = high * gain * 0.75f;
+        send(lo, hi);
+        active_ = lo > 0.0f || hi > 0.0f;
+        expiry_ = now + (duration_ms ? duration_ms : 150);
+    }
+
+    void tick(Uint32 now) {
+        if (ready_ && active_ && static_cast<Sint32>(now - expiry_) >= 0) {
+            send(0.0f, 0.0f);
+            active_ = false;
+        }
+    }
+
+    void stop() {
+        if (ready_) send(0.0f, 0.0f);
+        active_ = false;
+    }
 };
+#endif
+
+struct Settings {
+    int quality = 2;    // 0=720p, 1=1080p, 2=1080p HQ
+    int mapping = 0;    // 0=positional, 1=match labels
+    int vibration = 2;  // rumble intensity: 0=Off, 1=Low, 2=Medium, 3=High
+    int region = 0;     // region-bypass IP: 0=Off, else index into kRegion*
+    int language = 0;   // index into kLanguage* (0 = English US)
+};
+
+constexpr int kLanguageCount = 14;
+constexpr int kVibrationLevels = 4;
 
 Settings load_settings();
 void save_settings(const Settings& settings);
@@ -84,21 +164,28 @@ struct App {
 
     // library
     std::vector<Game> games;
-    std::vector<int> visible;  // indices into games after search filter
+    std::vector<int> visible;  // indices into games for the active tab + search
     std::string query;
     int cursor = 0;
+    LibraryTab tab = LibraryTab::All;
+    std::vector<std::string> favorites;  // title_ids, marked by the user
+    std::vector<std::string> history;    // title_ids, most-recent first
     std::atomic<int> load_state{0};  // 0 running, 1 ok, 2 error
     std::string load_error;
     std::string gamertag;
     Game launch_game;
     Settings settings;
     int settings_cursor = 0;
+    Scene settings_return = Scene::Library;  // scene to go back to from Settings
 
 #ifdef GNX_NATIVE_STREAM
     std::unique_ptr<stream::Engine> engine;
     Uint32 stream_hint_until = 0;
     bool deko_active = false;  // deko3d owns the display (SDL suspended)
     Uint32 last_input_ms = 0;  // input pacing during deko3d streaming
+#ifdef __SWITCH__
+    SwitchRumble rumble;  // server vibration reports -> HD rumble
+#endif
 #endif
 };
 
@@ -110,13 +197,57 @@ Settings load_settings() {
     if (data.is_discarded()) return settings;
     settings.quality = std::clamp(data.value("quality", 2), 0, 2);
     settings.mapping = std::clamp(data.value("mapping", 0), 0, 1);
+    // "vibration" was an on/off bool before intensity levels existed; migrate.
+    if (data.contains("vibration") && data["vibration"].is_boolean())
+        settings.vibration = data["vibration"].get<bool>() ? 2 : 0;
+    else
+        settings.vibration =
+            std::clamp(data.value("vibration", 2), 0, kVibrationLevels - 1);
+    settings.region = std::clamp(data.value("region", 0), 0, 5);
+    settings.language =
+        std::clamp(data.value("language", 0), 0, kLanguageCount - 1);
     return settings;
 }
 
 void save_settings(const Settings& settings) {
     std::ofstream out(data_path("settings.json"), std::ios::trunc);
     out << json{{"quality", settings.quality},
-                {"mapping", settings.mapping}}.dump(2);
+                {"mapping", settings.mapping},
+                {"vibration", settings.vibration},
+                {"region", settings.region},
+                {"language", settings.language}}.dump(2);
+}
+
+// Streamed console's system language (BCP-47). Games without an in-game
+// language menu inherit this; sent as the session "locale". Native labels are
+// limited to scripts the Switch Standard shared font can render (Latin,
+// Cyrillic, Japanese) -- Korean/Chinese need fonts we don't load.
+const char* kLanguageLabels[kLanguageCount] = {
+    "English (US)", "English (UK)", "Español (España)", "Español (México)",
+    "Français", "Deutsch", "Italiano", "Português (Brasil)",
+    "Português (Portugal)", "Polski", "Nederlands", "Türkçe",
+    "Russian", "Japanese"};
+const char* kLanguageCodes[kLanguageCount] = {
+    "en-US", "en-GB", "es-ES", "es-MX", "fr-FR", "de-DE", "it-IT",
+    "pt-BR", "pt-PT", "pl-PL", "nl-NL", "tr-TR", "ru-RU", "ja-JP"};
+
+// Rumble intensity. HD rumble at amplitude 1.0 is very strong and audibly hums,
+// so even "High" leaves headroom rather than driving the actuators flat out.
+const char* kVibrationLabels[kVibrationLevels] = {"Off", "Low", "Medium",
+                                                  "High"};
+const float kVibrationGain[kVibrationLevels] = {0.0f, 0.35f, 0.6f, 0.9f};
+
+// Region bypass: spoof a supported-region IP via X-Forwarded-For so xCloud's
+// geo gate opens for accounts outside the officially supported countries. IPs
+// are the known-good values shipped by better-xcloud. Index 0 = disabled.
+const char* kRegionLabels[6] = {"Off", "United States", "Brazil",
+                                "Japan", "Korea", "Poland"};
+const char* kRegionIps[6] = {"", "143.244.47.65", "169.150.198.66",
+                             "138.199.21.239", "121.125.60.151",
+                             "45.134.212.66"};
+
+void apply_region(const Settings& settings) {
+    Http::set_forwarded_for(kRegionIps[std::clamp(settings.region, 0, 5)]);
 }
 
 // ---- persistence ----------------------------------------------------------
@@ -151,6 +282,47 @@ std::vector<Game> load_games_cache() {
         if (!game.title_id.empty()) games.push_back(std::move(game));
     }
     return games;
+}
+
+// Favorites and history are stored as plain title-id lists (JSON arrays).
+std::vector<std::string> load_id_list(const char* leaf) {
+    std::vector<std::string> ids;
+    std::ifstream in(data_path(leaf));
+    if (!in) return ids;
+    json data = json::parse(in, nullptr, false);
+    if (!data.is_array()) return ids;
+    for (const json& entry : data)
+        if (entry.is_string()) ids.push_back(entry.get<std::string>());
+    return ids;
+}
+
+void save_id_list(const char* leaf, const std::vector<std::string>& ids) {
+    std::ofstream out(data_path(leaf), std::ios::trunc);
+    out << json(ids).dump();
+}
+
+bool is_favorite(const App& app, const std::string& id) {
+    return std::find(app.favorites.begin(), app.favorites.end(), id) !=
+           app.favorites.end();
+}
+
+void toggle_favorite(App& app, const std::string& id) {
+    auto it = std::find(app.favorites.begin(), app.favorites.end(), id);
+    if (it != app.favorites.end())
+        app.favorites.erase(it);
+    else
+        app.favorites.push_back(id);
+    save_id_list("favorites.json", app.favorites);
+}
+
+// Record a launch: move the title to the front, dedup, cap at kHistoryMax.
+void push_history(App& app, const std::string& id) {
+    auto it = std::find(app.history.begin(), app.history.end(), id);
+    if (it != app.history.end()) app.history.erase(it);
+    app.history.insert(app.history.begin(), id);
+    if (static_cast<int>(app.history.size()) > kHistoryMax)
+        app.history.resize(kHistoryMax);
+    save_id_list("history.json", app.history);
 }
 
 // ---- background work ------------------------------------------------------
@@ -236,15 +408,35 @@ std::string lowercase(std::string value) {
     return value;
 }
 
+int find_game(const App& app, const std::string& id) {
+    for (int i = 0; i < static_cast<int>(app.games.size()); ++i)
+        if (app.games[i].title_id == id) return i;
+    return -1;
+}
+
+// Rebuild `visible` for the active tab, honouring the search query. All /
+// Favorites keep the library's alphabetical order; History keeps recency order.
 void apply_filter(App& app) {
     app.visible.clear();
     std::string needle = lowercase(app.query);
-    for (int i = 0; i < static_cast<int>(app.games.size()); ++i) {
-        if (needle.empty() ||
-            lowercase(app.games[i].name).find(needle) != std::string::npos ||
-            lowercase(app.games[i].title_id).find(needle) !=
-                std::string::npos)
-            app.visible.push_back(i);
+    auto matches = [&](const Game& game) {
+        return needle.empty() ||
+               lowercase(game.name).find(needle) != std::string::npos ||
+               lowercase(game.title_id).find(needle) != std::string::npos;
+    };
+
+    if (app.tab == LibraryTab::History) {
+        for (const std::string& id : app.history) {
+            int i = find_game(app, id);
+            if (i >= 0 && matches(app.games[i])) app.visible.push_back(i);
+        }
+    } else {
+        for (int i = 0; i < static_cast<int>(app.games.size()); ++i) {
+            if (app.tab == LibraryTab::Favorites &&
+                !is_favorite(app, app.games[i].title_id))
+                continue;
+            if (matches(app.games[i])) app.visible.push_back(i);
+        }
     }
     app.cursor = std::min(app.cursor,
                           std::max(0, static_cast<int>(app.visible.size()) - 1));
@@ -309,7 +501,7 @@ void draw_signin(App& app) {
     app.gfx.text_centered(app.device_code.user_code, gfx::kWidth / 2, 585,
                           gfx::FontSize::Huge, gfx::kText);
     app.gfx.spinner(gfx::kWidth / 2, 780, SDL_GetTicks());
-    draw_footer(app, "Waiting for sign-in...   B  Exit");
+    draw_footer(app, "Waiting for sign-in...   ZL  Settings   B  Exit");
 }
 
 void draw_loading(App& app) {
@@ -331,25 +523,44 @@ constexpr int kGridX = (gfx::kWidth - kColumns * kCardW -
 constexpr int kGridY = 150;
 constexpr int kRowsVisible = 2;
 
+const char* kTabNames[kTabCount] = {"All games", "Favorites", "History"};
+
 void draw_library(App& app) {
-    // Header
+    // Header: title, tab bar, gamertag, count/search.
     app.gfx.text("green-nx", 60, 40, gfx::FontSize::Title, gfx::kText);
-    std::string counter =
-        std::to_string(app.visible.size()) + " games" +
-        (app.query.empty() ? "" : "  ·  search: \"" + app.query + "\"");
-    app.gfx.text(counter, 60, 105, gfx::FontSize::Small, gfx::kTextDim);
     if (!app.gamertag.empty())
         app.gfx.text(app.gamertag,
                      gfx::kWidth - 60 -
                          app.gfx.text_width(app.gamertag,
                                             gfx::FontSize::Body),
-                     55, gfx::FontSize::Body, gfx::kTextDim);
+                     50, gfx::FontSize::Body, gfx::kTextDim);
+
+    int tx = 60;
+    for (int t = 0; t < kTabCount; ++t) {
+        bool active = static_cast<int>(app.tab) == t;
+        int w = app.gfx.text(kTabNames[t], tx, 100, gfx::FontSize::Body,
+                             active ? gfx::kText : gfx::kTextDim);
+        if (active) app.gfx.fill({tx, 142, w, 4}, gfx::kAccent);
+        tx += w + 50;
+    }
+    std::string info = std::to_string(app.visible.size()) + " games";
+    if (!app.query.empty()) info += "   ·   \"" + app.query + "\"";
+    app.gfx.text(info,
+                 gfx::kWidth - 60 - app.gfx.text_width(info, gfx::FontSize::Small),
+                 112, gfx::FontSize::Small, gfx::kTextDim);
 
     if (app.visible.empty()) {
-        app.gfx.text_centered(
-            app.query.empty() ? "No games available for this account"
-                              : "Nothing found for \"" + app.query + "\"",
-            gfx::kWidth / 2, 480, gfx::FontSize::Body, gfx::kTextDim);
+        std::string msg;
+        if (!app.query.empty())
+            msg = "Nothing found for \"" + app.query + "\"";
+        else if (app.tab == LibraryTab::Favorites)
+            msg = "No favorites yet - press X on a game to add it";
+        else if (app.tab == LibraryTab::History)
+            msg = "Nothing played yet - your recent games will appear here";
+        else
+            msg = "No games available for this account";
+        app.gfx.text_centered(msg, gfx::kWidth / 2, 480, gfx::FontSize::Body,
+                              gfx::kTextDim);
     }
 
     int first_row = std::max(0, app.cursor / kColumns - (kRowsVisible - 1));
@@ -377,6 +588,15 @@ void draw_library(App& app) {
                                   gfx::FontSize::Small, gfx::kTextDim);
         }
 
+        // Favorite marker: a gold badge (with a star glyph on top) top-left.
+        // The badge alone reads as "marked" even if the font lacks the glyph.
+        if (is_favorite(app, game.title_id)) {
+            SDL_Rect badge = {card.x + 8, card.y + 8, 50, 50};
+            app.gfx.fill(badge, gfx::kWarn);
+            app.gfx.text_centered("★", badge.x + 25, badge.y + 4,
+                                  gfx::FontSize::Body, gfx::kBg);
+        }
+
         if (index == app.cursor) {
             app.gfx.frame(card, gfx::kCardFocus, 5);
             const std::string& label =
@@ -388,8 +608,8 @@ void draw_library(App& app) {
     }
 
     draw_footer(app,
-                "A  Play   Y  Search   ZL  Settings   X  Refresh   "
-                "-  Sign out   +  Exit");
+                "A  Play   X  Favorite   L/R  Tabs   Y  Search   "
+                "ZR  Refresh   ZL  Settings   -  Sign out   +  Exit");
 }
 
 const char* kQualityLabels[3] = {"720p", "1080p", "1080p high bitrate"};
@@ -403,26 +623,40 @@ void draw_settings(App& app) {
         const char* title;
         std::string value;
     };
-    Row rows[2] = {
+    Row rows[5] = {
         {"Stream quality", kQualityLabels[app.settings.quality]},
         {"Button layout", kMappingLabels[app.settings.mapping]},
+        {"Vibration", kVibrationLabels[app.settings.vibration]},
+        {"Region bypass", kRegionLabels[app.settings.region]},
+        {"Game language", kLanguageLabels[app.settings.language]},
     };
-    for (int i = 0; i < 2; ++i) {
-        SDL_Rect row = {120, 220 + i * 130, gfx::kWidth - 240, 100};
+    for (int i = 0; i < 5; ++i) {
+        SDL_Rect row = {120, 170 + i * 118, gfx::kWidth - 240, 94};
         app.gfx.fill(row, gfx::kCard);
         if (i == app.settings_cursor) app.gfx.frame(row, gfx::kCardFocus, 4);
-        app.gfx.text(rows[i].title, row.x + 40, row.y + 30,
+        app.gfx.text(rows[i].title, row.x + 40, row.y + 27,
                      gfx::FontSize::Body, gfx::kText);
         app.gfx.text(rows[i].value,
                      row.x + row.w - 40 -
                          app.gfx.text_width(rows[i].value,
                                             gfx::FontSize::Body),
-                     row.y + 30, gfx::FontSize::Body, gfx::kAccent);
+                     row.y + 27, gfx::FontSize::Body, gfx::kAccent);
     }
-    app.gfx.text_centered(
-        "Higher quality needs a stronger connection - 5 GHz Wi-Fi or "
-        "docked LAN recommended for 1080p high bitrate",
-        gfx::kWidth / 2, 620, gfx::FontSize::Small, gfx::kTextDim);
+    const char* note;
+    if (app.settings_cursor == 4)
+        note =
+            "Sets the streamed console's language. Applies to games that have "
+            "no in-game language menu; takes effect on the next launch.";
+    else if (app.settings.region != 0)
+        note =
+            "Region bypass spoofs your location to Xbox to reach xCloud from "
+            "an unsupported country. Use your own account at your own risk.";
+    else
+        note =
+            "Higher quality needs a stronger connection - 5 GHz Wi-Fi or "
+            "docked LAN recommended for 1080p high bitrate";
+    app.gfx.text_centered(note, gfx::kWidth / 2, 800, gfx::FontSize::Small,
+                          gfx::kTextDim);
     draw_footer(app, "Left / Right  Change   B  Back");
 }
 
@@ -472,6 +706,30 @@ xcloud::GamepadFrame read_gamepad(SDL_Joystick* joystick, int mapping) {
     return frame;
 }
 
+// Drain the newest rumble command from the engine and drive the motors, then
+// service the auto-stop timer. Runs every frame on the main thread. The setting
+// gates it: when vibration is off we stop and never start. See SwitchRumble for
+// why this goes through libnx instead of SDL_JoystickRumble.
+void apply_rumble(App& app) {
+#ifdef __SWITCH__
+    Uint32 now = SDL_GetTicks();
+    float gain = kVibrationGain[std::clamp(app.settings.vibration, 0,
+                                           kVibrationLevels - 1)];
+    stream::Engine::RumbleCommand cmd;
+    if (app.engine->take_rumble(cmd)) {
+        if (gain > 0.0f)
+            app.rumble.play(cmd.low / 65535.0f, cmd.high / 65535.0f, gain,
+                            cmd.duration_ms, now);
+        else
+            app.rumble.stop();
+    }
+    app.rumble.tick(now);
+#else
+    stream::Engine::RumbleCommand cmd;
+    (void)app.engine->take_rumble(cmd);  // PC: no rumble hardware
+#endif
+}
+
 void draw_stream(App& app, SDL_Joystick* joystick) {
     stream::EngineState state = app.engine->state();
 
@@ -506,6 +764,7 @@ void draw_stream(App& app, SDL_Joystick* joystick) {
         app.gfx.draw_texture(frame, destination);
         app.engine->send_gamepad(
             read_gamepad(joystick, app.settings.mapping));
+        apply_rumble(app);
 
         if (SDL_GetTicks() < app.stream_hint_until)
             app.gfx.text_centered(
@@ -535,7 +794,14 @@ void draw_fatal(App& app) {
     if (app.fatal.size() > 90)
         app.gfx.text_centered(app.fatal.substr(90, 90), gfx::kWidth / 2, 520,
                               gfx::FontSize::Body, gfx::kText);
-    draw_footer(app, "X  Retry   -  Sign out   +  Exit");
+    // The streaming-login step is the geo gate; if it failed, point the user at
+    // the Region bypass setting rather than leaving them at a dead end.
+    if (app.fatal.find("streaming login") != std::string::npos)
+        app.gfx.text_centered(
+            "Xbox Cloud Gaming may be unavailable in your region. Press ZL for "
+            "Settings, turn on Region bypass, then press X to retry.",
+            gfx::kWidth / 2, 610, gfx::FontSize::Small, gfx::kTextDim);
+    draw_footer(app, "X  Retry   ZL  Settings   -  Sign out   +  Exit");
 }
 
 // ---- input ----------------------------------------------------------------
@@ -543,7 +809,8 @@ void draw_fatal(App& app) {
 struct Input {
     bool a = false, b = false, x = false, y = false;
     bool up = false, down = false, left = false, right = false;
-    bool plus = false, minus = false, zl = false;
+    bool plus = false, minus = false, zl = false, zr = false;
+    bool l = false, r = false;
     bool quit = false;
 };
 
@@ -565,6 +832,9 @@ Input poll_input(SDL_Joystick* joystick) {
                 case kBtnPlus: input.plus = true; break;
                 case kBtnMinus: input.minus = true; break;
                 case kBtnZL: input.zl = true; break;
+                case kBtnZR: input.zr = true; break;
+                case kBtnL: input.l = true; break;
+                case kBtnR: input.r = true; break;
             }
         }
         if (event.type == SDL_KEYDOWN) {  // desktop testing
@@ -576,7 +846,10 @@ Input poll_input(SDL_Joystick* joystick) {
                 case SDLK_LEFT: input.left = true; break;
                 case SDLK_RIGHT: input.right = true; break;
                 case SDLK_s: input.y = true; break;
-                case SDLK_r: input.x = true; break;
+                case SDLK_f: input.x = true; break;   // favorite
+                case SDLK_r: input.zr = true; break;  // refresh
+                case SDLK_LEFTBRACKET: input.l = true; break;
+                case SDLK_RIGHTBRACKET: input.r = true; break;
             }
         }
     }
@@ -632,6 +905,12 @@ int main(int argc, char** argv) {
     app.covers = std::make_unique<Covers>(app.gfx, data_path("covers"));
     app.auth = std::make_unique<XboxAuth>(data_path("tokens.json"));
     app.settings = load_settings();
+    app.favorites = load_id_list("favorites.json");
+    app.history = load_id_list("history.json");
+    apply_region(app.settings);  // before any network: gate opens on first call
+#if defined(__SWITCH__) && defined(GNX_NATIVE_STREAM)
+    app.rumble.init();  // HID is up (joystick opened) -> get vibration handles
+#endif
     app.scene_started = SDL_GetTicks();
 #ifdef GNX_NATIVE_STREAM
     app.engine =
@@ -661,6 +940,11 @@ int main(int argc, char** argv) {
                     app.signin_state = 4;  // cancel
                     join_worker(app);
                     running = false;
+                    break;
+                }
+                if (input.zl) {  // reach Region bypass before the library loads
+                    app.settings_return = Scene::SignIn;
+                    app.scene = Scene::Settings;
                     break;
                 }
                 if (app.signin_state == 1) {
@@ -703,11 +987,23 @@ int main(int argc, char** argv) {
                         app.cursor + step, 0,
                         static_cast<int>(app.visible.size()) - 1);
                 }
+                if (input.l || input.r) {  // switch tab
+                    int t = (static_cast<int>(app.tab) + (input.r ? 1 : -1) +
+                             kTabCount) % kTabCount;
+                    app.tab = static_cast<LibraryTab>(t);
+                    app.cursor = 0;
+                    apply_filter(app);
+                }
+                if (input.x && !app.visible.empty()) {  // toggle favorite
+                    toggle_favorite(
+                        app, app.games[app.visible[app.cursor]].title_id);
+                    apply_filter(app);  // Favorites tab updates live
+                }
                 if (input.y) {
                     app.query = keyboard_input(app.query);
                     apply_filter(app);
                 }
-                if (input.x) {
+                if (input.zr) {  // refresh library from Xbox
                     app.scene = Scene::LoadingLibrary;
                     start_library_load(app, true);
                 }
@@ -719,13 +1015,18 @@ int main(int argc, char** argv) {
                     app.scene = Scene::SignIn;
                     start_signin(app);
                 }
-                if (input.zl) app.scene = Scene::Settings;
+                if (input.zl) {
+                    app.settings_return = Scene::Library;
+                    app.scene = Scene::Settings;
+                }
                 if (input.a && !app.visible.empty()) {
                     app.launch_game = app.games[app.visible[app.cursor]];
+                    push_history(app, app.launch_game.title_id);
 #ifdef GNX_NATIVE_STREAM
                     app.engine->start(
                         app.launch_game.title_id,
-                        static_cast<QualityTier>(app.settings.quality));
+                        static_cast<QualityTier>(app.settings.quality),
+                        kLanguageCodes[app.settings.language]);
                     app.stream_hint_until = SDL_GetTicks() + 8000;
                     app.scene = Scene::Stream;
 #endif
@@ -735,19 +1036,34 @@ int main(int argc, char** argv) {
             }
 
             case Scene::Settings: {
-                if (input.up) app.settings_cursor = 0;
-                if (input.down) app.settings_cursor = 1;
+                if (input.up)
+                    app.settings_cursor = std::max(0, app.settings_cursor - 1);
+                if (input.down)
+                    app.settings_cursor = std::min(4, app.settings_cursor + 1);
                 int direction = (input.right ? 1 : 0) - (input.left ? 1 : 0);
                 if (direction != 0) {
                     if (app.settings_cursor == 0)
                         app.settings.quality =
                             (app.settings.quality + direction + 3) % 3;
-                    else
+                    else if (app.settings_cursor == 1)
                         app.settings.mapping =
                             (app.settings.mapping + direction + 2) % 2;
+                    else if (app.settings_cursor == 2)
+                        app.settings.vibration =
+                            (app.settings.vibration + direction +
+                             kVibrationLevels) %
+                            kVibrationLevels;
+                    else if (app.settings_cursor == 3) {
+                        app.settings.region =
+                            (app.settings.region + direction + 6) % 6;
+                        apply_region(app.settings);  // takes effect next request
+                    } else
+                        app.settings.language =
+                            (app.settings.language + direction + kLanguageCount) %
+                            kLanguageCount;
                     save_settings(app.settings);
                 }
-                if (input.b || input.zl) app.scene = Scene::Library;
+                if (input.b || input.zl) app.scene = app.settings_return;
                 break;
             }
 
@@ -775,7 +1091,8 @@ int main(int argc, char** argv) {
                     if (input.a) {  // retry
                         app.engine->start(
                             app.launch_game.title_id,
-                            static_cast<QualityTier>(app.settings.quality));
+                            static_cast<QualityTier>(app.settings.quality),
+                            kLanguageCodes[app.settings.language]);
                         app.stream_hint_until = SDL_GetTicks() + 8000;
                     }
                 } else if (input.b) {  // cancel while connecting
@@ -791,6 +1108,11 @@ int main(int argc, char** argv) {
 #endif
 
             case Scene::Fatal:
+                if (input.zl) {  // enable Region bypass, then X to retry
+                    app.settings_return = Scene::Fatal;
+                    app.scene = Scene::Settings;
+                    break;
+                }
                 if (input.x) {
                     app.scene = Scene::LoadingLibrary;
                     start_library_load(app, true);
@@ -824,6 +1146,9 @@ int main(int argc, char** argv) {
             app.engine->end_deko_output();  // release the swapchain first
             app.gfx.resume();
             app.deko_active = false;
+#ifdef __SWITCH__
+            app.rumble.stop();  // motors off when the stream ends
+#endif
         }
         if (app.deko_active) {
             app.engine->pump_video();  // decodes + presents via deko3d
@@ -834,6 +1159,7 @@ int main(int argc, char** argv) {
             if (now - app.last_input_ms >= 8) {
                 app.engine->send_gamepad(
                     read_gamepad(joystick, app.settings.mapping));
+                apply_rumble(app);
                 app.last_input_ms = now;
             }
             SDL_Delay(1);  // yield between video frames instead of busy-spinning

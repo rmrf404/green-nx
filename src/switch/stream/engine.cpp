@@ -108,10 +108,12 @@ void Engine::log(const std::string& line) {
     std::fflush(log_file_);
 }
 
-void Engine::start(const std::string& title_id, QualityTier tier) {
+void Engine::start(const std::string& title_id, QualityTier tier,
+                   const std::string& locale) {
     stop();
     title_id_ = title_id;
     tier_ = tier;
+    locale_ = locale;
     {
         std::lock_guard<std::mutex> lock(log_mutex_);
         if (log_file_) std::fclose(log_file_);
@@ -345,6 +347,13 @@ void Engine::handle_channel_message(uint16_t sid, const char* data,
     // instant xCloud's first message arrived -> stuck on "Handshaking"). peer_
     // is guaranteed alive for the duration of this callback.
     char* label = peer_ ? peer_connection_lookup_sid_label(peer_, sid) : nullptr;
+    if (label && std::strcmp(label, "input") == 0) {
+        // Binary telemetry/rumble from the server. Handle it here and return so
+        // the raw bytes don't spam the log -- vibration reports can arrive many
+        // times a second while a game is rumbling.
+        handle_input_report(reinterpret_cast<const uint8_t*>(data), size);
+        return;
+    }
     // Log every inbound control/message payload so the exact xCloud protocol
     // exchange is visible in stream-log.txt during bring-up.
     {
@@ -384,6 +393,62 @@ void Engine::handle_channel_message(uint16_t sid, const char* data,
     }
 }
 
+void Engine::handle_input_report(const uint8_t* data, size_t size) {
+    // Server "input"-channel report. We only act on Vibration (type 128). The
+    // wire layout matches the xbox.com/play client (ref: greenlight):
+    //   [0]  report type (128 = Vibration)
+    //   [2]  rumble type (0 = four-motor)     [3]  gamepad index
+    //   [4]  left motor %   [5]  right motor %
+    //   [6]  left-trigger % [7]  right-trigger %   (all 0..100)
+    //   [8:2] duration ms (LE)  [10:2] delay ms (LE)  [12] repeat count
+    if (size < 13 || data[0] != 128) return;
+
+    auto pct = [](uint8_t v) { return v >= 100 ? 1.0f : v / 100.0f; };
+    // The Switch has no trigger actuators. Fold the trigger motors into the LOW
+    // band (a duller thud) instead of the high band: driving the high band hard
+    // produces an audible, harsh whine, and shooters hammer the triggers.
+    float low_pct = pct(data[4]) + (pct(data[6]) + pct(data[7])) * 0.5f;
+    if (low_pct > 1.0f) low_pct = 1.0f;
+    float high_pct = pct(data[5]);
+
+    uint16_t duration = static_cast<uint16_t>(data[8] | (data[9] << 8));
+    uint16_t delay = static_cast<uint16_t>(data[10] | (data[11] << 8));
+    uint8_t repeat = data[12];
+
+    // Each report is self-terminating: SDL plays the effect for duration_ms and
+    // stops on its own, exactly like the browser client's fixed-duration effect
+    // -- so no "stop" packet is needed (the input channel is unreliable). For
+    // repeated pulses we approximate the whole envelope as one window (the
+    // off-gaps can't be reproduced through SDL) and cap it, so a corrupt length
+    // can never leave a motor stuck on.
+    uint32_t duration_ms = duration;
+    if (repeat > 0)
+        duration_ms += static_cast<uint32_t>(repeat) * (duration + delay);
+    if (duration_ms > 4000) duration_ms = 4000;
+
+    RumbleCommand cmd;
+    cmd.low = static_cast<uint16_t>(low_pct * 65535.0f);
+    cmd.high = static_cast<uint16_t>(high_pct * 65535.0f);
+    cmd.duration_ms = duration_ms;
+    {
+        std::lock_guard<std::mutex> lock(rumble_mutex_);
+        rumble_cmd_ = cmd;
+        rumble_pending_ = true;
+    }
+    if (!rumble_logged_) {
+        rumble_logged_ = true;
+        log("rumble: first server vibration report received");
+    }
+}
+
+bool Engine::take_rumble(RumbleCommand& out) {
+    std::lock_guard<std::mutex> lock(rumble_mutex_);
+    if (!rumble_pending_) return false;
+    out = rumble_cmd_;
+    rumble_pending_ = false;
+    return true;
+}
+
 // ---- worker ---------------------------------------------------------------
 
 void Engine::worker() {
@@ -395,7 +460,7 @@ void Engine::worker() {
         GssvSession::cleanup_stale_sessions(http_, cloud_);
 
         set_status("Requesting a session...");
-        GssvSession session(http_, cloud_, tier_);
+        GssvSession session(http_, cloud_, tier_, locale_);
         session.start_cloud(title_id_);
 
         set_status("Waiting for a server...");

@@ -28,7 +28,8 @@ enum class SessionState {
 class GssvSession {
 public:
     GssvSession(Http& http, EndpointCredentials credentials,
-                QualityTier tier = QualityTier::P1080HQ);
+                QualityTier tier = QualityTier::P1080HQ,
+                std::string locale = "en-US");
 
     // POST /v5/sessions/cloud/play for a title.
     void start_cloud(const std::string& title_id);
@@ -65,6 +66,7 @@ private:
     Http& http_;
     EndpointCredentials credentials_;
     QualityTier tier_;
+    std::string locale_;  // BCP-47 sent as the streamed console's system language
     std::string session_path_;
     SessionState state_ = SessionState::New;
     std::string error_details_;

@@ -106,8 +106,11 @@ bool decode_teredo(const std::string& addr, std::string* ipv4, int* port) {
 }  // namespace
 
 GssvSession::GssvSession(Http& http, EndpointCredentials credentials,
-                         QualityTier tier)
-    : http_(http), credentials_(std::move(credentials)), tier_(tier) {}
+                         QualityTier tier, std::string locale)
+    : http_(http),
+      credentials_(std::move(credentials)),
+      tier_(tier),
+      locale_(std::move(locale)) {}
 
 std::string GssvSession::url(const std::string& suffix) const {
     std::string path = session_path_;
@@ -135,7 +138,7 @@ void GssvSession::start_cloud(const std::string& title_id) {
           {"enableOptionalDataCollection", false},
           {"enableTextToSpeech", false},
           {"highContrast", 0},
-          {"locale", "en-US"},
+          {"locale", locale_},
           {"useIceConnection", false},
           {"timezoneOffsetMinutes", 120},
           {"sdkType", "web"},

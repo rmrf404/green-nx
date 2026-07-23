@@ -2,6 +2,7 @@
 
 #include <curl/curl.h>
 
+#include <mutex>
 #include <stdexcept>
 
 namespace gnx {
@@ -16,6 +17,9 @@ size_t write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
 
 std::string g_ca_bundle;
 
+std::mutex g_forwarded_mutex;
+std::string g_forwarded_for;  // guarded by g_forwarded_mutex
+
 int abort_cb(void* userdata, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
     auto* flag = static_cast<std::atomic<bool>*>(userdata);
     return (flag && flag->load()) ? 1 : 0;  // non-zero aborts the transfer
@@ -24,6 +28,11 @@ int abort_cb(void* userdata, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
 }  // namespace
 
 void Http::set_ca_bundle(std::string path) { g_ca_bundle = std::move(path); }
+
+void Http::set_forwarded_for(std::string ip) {
+    std::lock_guard<std::mutex> lock(g_forwarded_mutex);
+    g_forwarded_for = std::move(ip);
+}
 
 Http::Http() {
     curl_ = curl_easy_init();
@@ -85,6 +94,12 @@ HttpResponse Http::request(const char* method, const std::string& url,
     }
 
     curl_slist* list = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_forwarded_mutex);
+        if (!g_forwarded_for.empty())
+            list = curl_slist_append(
+                list, ("X-Forwarded-For: " + g_forwarded_for).c_str());
+    }
     for (const auto& header : headers)
         list = curl_slist_append(list, header.c_str());
     if (list) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);

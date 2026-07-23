@@ -44,7 +44,8 @@ public:
     Engine(XboxAuth& auth, SDL_Renderer* renderer);
     ~Engine();
 
-    void start(const std::string& title_id, QualityTier tier);
+    void start(const std::string& title_id, QualityTier tier,
+               const std::string& locale = "en-US");
     void stop();
 
     EngineState state() const { return state_; }
@@ -67,12 +68,24 @@ public:
     void send_gamepad(const xcloud::GamepadFrame& frame);
     void request_keyframe();
 
+    // Controller rumble decoded from the server's "input" channel. The main
+    // thread (which owns the SDL joystick) drains the latest command once per
+    // frame and actuates it via SDL_JoystickRumble -- keeping every SDL joystick
+    // call on one thread avoids racing SDL's own joystick bookkeeping.
+    struct RumbleCommand {
+        uint16_t low = 0;          // large (low-frequency) motor, 0..0xFFFF
+        uint16_t high = 0;         // small (high-frequency) motor, 0..0xFFFF
+        uint32_t duration_ms = 0;  // self-terminating, per the server report
+    };
+    bool take_rumble(RumbleCommand& out);  // true if a fresh command was pending
+
 private:
     void worker();
     void run_peer(GssvSession& session);
     void set_status(const std::string& status);
     void fail(const std::string& error);
     void handle_channel_message(uint16_t sid, const char* data, size_t size);
+    void handle_input_report(const uint8_t* data, size_t size);  // rumble, etc.
     void open_data_channels();
     void request_keyframe_locked();  // caller holds peer_mutex_
     void send_on_channel(const char* label, const std::string& payload);
@@ -102,6 +115,7 @@ private:
     EndpointCredentials cloud_;
     std::string title_id_;
     QualityTier tier_ = QualityTier::P1080HQ;
+    std::string locale_ = "en-US";  // streamed console's system language
 public:
     void log(const std::string& line);  // also used by the libpeer log sink
 
@@ -128,6 +142,13 @@ private:
 
     xcloud::InputSerializer input_;
     std::mutex input_mutex_;
+
+    // Server->client rumble. Written by the peer thread (handle_input_report),
+    // drained by the main thread (take_rumble). Latest command wins.
+    std::mutex rumble_mutex_;
+    RumbleCommand rumble_cmd_;
+    bool rumble_pending_ = false;
+    bool rumble_logged_ = false;  // peer thread only: log the first report once
     Uint64 stream_epoch_ = 0;
     std::atomic<Uint64> last_keyframe_req_{0};
     std::atomic<uint32_t> pli_sent_{0};  // RTCP PLI keyframe requests
