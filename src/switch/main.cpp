@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <memory>
@@ -149,8 +150,53 @@ constexpr int kVibrationLevels = 4;
 Settings load_settings();
 void save_settings(const Settings& settings);
 
+// Short synthesized "tick" for menu navigation. Played through SDL's audren
+// backend, which is independent of the stream's audout output, so the two never
+// conflict. play() takes an amplitude multiplier (1.0 = the base tick level).
+class UiSound {
+public:
+    bool init() {
+        SDL_AudioSpec want{}, have{};
+        want.freq = 48000;
+        want.format = AUDIO_S16SYS;
+        want.channels = 2;
+        want.samples = 512;
+        dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+        if (!dev_) return false;
+        const int n = 48000 * 16 / 1000;  // ~16 ms
+        click_.resize(static_cast<size_t>(n) * 2);
+        for (int i = 0; i < n; ++i) {
+            float t = static_cast<float>(i) / 48000.0f;
+            float s = std::sin(2.0f * 3.14159265f * 1600.0f * t) *
+                      std::exp(-t * 140.0f) * 0.09f;  // quiet base level
+            auto v = static_cast<int16_t>(s * 32767.0f);
+            click_[i * 2] = v;
+            click_[i * 2 + 1] = v;
+        }
+        SDL_PauseAudioDevice(dev_, 0);
+        return true;
+    }
+    void play(float volume) {
+        if (!dev_ || click_.empty()) return;
+        std::vector<int16_t> buf(click_.size());
+        for (size_t i = 0; i < click_.size(); ++i) {
+            int v = static_cast<int>(click_[i] * volume);
+            buf[i] = v > 32767 ? 32767 : (v < -32768 ? -32768
+                                                     : static_cast<int16_t>(v));
+        }
+        SDL_ClearQueuedAudio(dev_);  // don't pile up on rapid navigation
+        SDL_QueueAudio(dev_, buf.data(),
+                       static_cast<Uint32>(buf.size() * sizeof(int16_t)));
+    }
+
+private:
+    SDL_AudioDeviceID dev_ = 0;
+    std::vector<int16_t> click_;
+};
+
 struct App {
     gfx::Gfx gfx;
+    UiSound ui_sound;
     std::unique_ptr<Covers> covers;
     std::unique_ptr<XboxAuth> auth;
 
@@ -1639,6 +1685,7 @@ int main(int argc, char** argv) {
 
     App app;
     if (!app.gfx.init()) return 1;
+    app.ui_sound.init();  // menu navigation ticks (best-effort; ignored on fail)
     SDL_Joystick* joystick = SDL_JoystickOpen(0);
     app.covers = std::make_unique<Covers>(app.gfx, data_path("covers"));
     app.auth = std::make_unique<XboxAuth>(data_path("tokens.json"));
@@ -1669,6 +1716,12 @@ int main(int argc, char** argv) {
     while (running) {
         Input input = poll_input(joystick);
         if (input.quit) break;
+
+        // Snapshot navigation state; a menu tick plays below if it moved this
+        // frame (grid cursor, tab, console cursor, settings row).
+        int nav_cursor = app.cursor, nav_console = app.console_cursor,
+            nav_settings = app.settings_cursor;
+        LibraryTab nav_tab = app.tab;
 
         switch (app.scene) {
             case Scene::Splash:
@@ -2017,6 +2070,11 @@ int main(int argc, char** argv) {
             continue;      // deko3d owns the frame; no SDL pass this iteration
         }
 #endif
+
+        if (app.cursor != nav_cursor || app.tab != nav_tab ||
+            app.console_cursor != nav_console ||
+            app.settings_cursor != nav_settings)
+            app.ui_sound.play(1.0f);
 
         app.covers->pump();
         app.gfx.begin_frame();
