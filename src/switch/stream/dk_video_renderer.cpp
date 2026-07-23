@@ -19,7 +19,7 @@ namespace gnx::stream {
 
 namespace {
 
-constexpr uint32_t kCodeSize = 64 * 1024;
+constexpr uint32_t kCodeSize = 96 * 1024;  // video vsh + video fsh + hud fsh
 constexpr uint32_t kCmdSize = 64 * 1024;
 constexpr uint32_t kDataSize = 0x1000;
 
@@ -28,6 +28,7 @@ constexpr uint32_t kUniformOff = 0x000;   // Transformation UBO (256B aligned)
 constexpr uint32_t kSamplerOff = 0x100;   // sampler descriptor set
 constexpr uint32_t kImageOff = 0x200;     // image descriptor set (luma, chroma)
 constexpr uint32_t kVtxOff = 0x300;       // quad vertex buffer
+constexpr uint32_t kHudVtxOff = 0x380;    // HUD overlay corner quad
 
 struct Vertex {
     float position[3];
@@ -40,6 +41,14 @@ constexpr Vertex kQuad[] = {
     {{-1.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
     {{+1.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
     {{+1.0f, +1.0f, 0.0f}, {1.0f, 0.0f}},
+};
+
+// Top-left corner quad for the HUD overlay (deko3d clip space, UV top-left).
+constexpr Vertex kHudQuad[] = {
+    {{-0.98f, +0.98f, 0.0f}, {0.0f, 0.0f}},
+    {{-0.98f, +0.46f, 0.0f}, {0.0f, 1.0f}},
+    {{-0.40f, +0.46f, 0.0f}, {1.0f, 1.0f}},
+    {{-0.40f, +0.98f, 0.0f}, {1.0f, 0.0f}},
 };
 
 // std140 layout for: mat3 yuvmat; vec3 offset; vec4 uv_data;
@@ -210,12 +219,15 @@ bool DkVideoRenderer::init() {
     };
     if (!load_shader(vertex_shader_, "romfs:/shaders/video_vsh.dksh", 0) ||
         !load_shader(fragment_shader_, "romfs:/shaders/video_fsh.dksh",
-                     0x8000)) {
+                     0x8000) ||
+        !load_shader(hud_fsh_, "romfs:/shaders/hud_fsh.dksh", 0x10000)) {
         return false;
     }
 
     // Vertex buffer (static).
     std::memcpy(static_cast<uint8_t*>(data_cpu_) + kVtxOff, kQuad, sizeof(kQuad));
+    std::memcpy(static_cast<uint8_t*>(data_cpu_) + kHudVtxOff, kHudQuad,
+                sizeof(kHudQuad));
 
     // Sampler descriptor (linear, clamp to edge). Written into the descriptor
     // set from the command buffer each frame (canonical deko3d pattern).
@@ -504,6 +516,24 @@ bool DkVideoRenderer::render(AVFrame* frame) {
     cmdbuf_.bindVtxBufferState({DkVtxBufferState{sizeof(Vertex), 0}});
     cmdbuf_.bindVtxBuffer(0, data_gpu_ + kVtxOff, sizeof(kQuad));
 
+    cmdbuf_.draw(DkPrimitive_Quads, 4, 1, 0, 0);
+
+    // --- HUD overlay pass (stage 0): a semi-transparent panel alpha-blended
+    // over the video, top-left. Reuses the video vertex shader; hud_fsh_ fills
+    // the panel. Stage 1 will sample a rasterized-text texture here instead.
+    dk::BlendState hud_blend;
+    hud_blend.setColorBlendOp(DkBlendOp_Add);
+    hud_blend.setSrcColorBlendFactor(DkBlendFactor_SrcAlpha);
+    hud_blend.setDstColorBlendFactor(DkBlendFactor_InvSrcAlpha);
+    hud_blend.setAlphaBlendOp(DkBlendOp_Add);
+    hud_blend.setSrcAlphaBlendFactor(DkBlendFactor_One);
+    hud_blend.setDstAlphaBlendFactor(DkBlendFactor_InvSrcAlpha);
+    dk::ColorState hud_color;
+    hud_color.setBlendEnable(0, true);
+    cmdbuf_.bindBlendStates(0, {hud_blend});
+    cmdbuf_.bindColorState(hud_color);
+    cmdbuf_.bindShaders(DkStageFlag_GraphicsMask, {&vertex_shader_, &hud_fsh_});
+    cmdbuf_.bindVtxBuffer(0, data_gpu_ + kHudVtxOff, sizeof(kHudQuad));
     cmdbuf_.draw(DkPrimitive_Quads, 4, 1, 0, 0);
 
     queue_.submitCommands(cmdbuf_.finishList());

@@ -110,6 +110,7 @@ private:
 
     dk::Shader vertex_shader_;
     dk::Shader fragment_shader_;
+    dk::Shader hud_fsh_;  // HUD overlay (stage 0: flat panel; stage 1: text)
 
     // data_memblock_ sub-allocations (offsets):
     uint32_t vtx_offset_ = 0;        // quad vertex buffer
