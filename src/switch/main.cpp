@@ -1466,6 +1466,13 @@ void draw_stream(App& app, SDL_Joystick* joystick) {
               32;
     }
 
+    // In-stream controls, taught here because once deko3d owns the display
+    // no overlay can be drawn on Switch — this screen is the last chance.
+    app.gfx.text_centered(
+        "In the stream:  hold  −  and  +  together to leave   ·   "
+        "press  L3 + R3  together for the Xbox guide menu",
+        gfx::kWidth / 2, 920, gfx::FontSize::Small, gfx::kTextDim);
+
     // Source/quality chip, top right.
     std::string quality =
         app.launching_home
