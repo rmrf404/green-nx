@@ -155,8 +155,10 @@ void GssvSession::start_cloud(const std::string& title_id) {
 }
 
 // Same request shape as start_cloud, but on the home platform: the target is
-// a serverId (your console) instead of a titleId, and useIceConnection is on
-// -- home streaming negotiates a direct (local-network) path when possible.
+// a serverId (your console) instead of a titleId. Field values mirror
+// green-vita's working home client exactly -- in particular
+// useIceConnection stays false; true makes the console agent reject the
+// start with AgentCommandError.
 void GssvSession::start_home(const std::string& server_id) {
     json body = {
         {"clientSessionId", ""},
@@ -168,7 +170,7 @@ void GssvSession::start_home(const std::string& server_id) {
           {"enableTextToSpeech", false},
           {"highContrast", 0},
           {"locale", locale_},
-          {"useIceConnection", true},
+          {"useIceConnection", false},
           {"timezoneOffsetMinutes", 120},
           {"sdkType", "web"},
           {"osName", os_name(tier_)}}},
@@ -346,7 +348,9 @@ void GssvSession::stop() {
 void GssvSession::cleanup_stale_sessions(
     Http& http, const EndpointCredentials& credentials,
     const std::string& platform) {
-    GssvSession probe(http, credentials);
+    GssvSession probe(http, credentials,
+                      platform == "home" ? QualityTier::P720
+                                         : QualityTier::P1080HQ);
     try {
         json response = parse_or_throw(
             http.get(credentials.host + "/v5/sessions/" + platform + "/active",
