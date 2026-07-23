@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -419,12 +420,27 @@ void start_library_load(App& app, bool force_refresh) {
             app.status = "Loading your library...";
             Http http;
             // Linked consoles for xHome remote play. Non-fatal: no consoles
-            // (or an error here) just leaves the source picker hidden.
+            // (or an error here) just leaves the source picker hidden. The
+            // outcome lands in consoles-log.txt so "option not showing" is
+            // diagnosable from the SD card.
+            std::string console_log;
             try {
                 app.consoles = fetch_home_consoles(http, credentials.home);
                 save_consoles_cache(app.consoles);
-            } catch (const std::exception&) {
+                console_log = "found " + std::to_string(app.consoles.size()) +
+                              " console(s)";
+                for (const HomeConsole& c : app.consoles)
+                    console_log += "\n  " + c.name + " [" + c.console_type +
+                                   "] power=" + c.power_state;
+            } catch (const std::exception& error) {
                 app.consoles.clear();
+                console_log = std::string("console list failed: ") +
+                              error.what();
+            }
+            if (FILE* f = std::fopen(data_path("consoles-log.txt").c_str(),
+                                     "w")) {
+                std::fprintf(f, "%s\n", console_log.c_str());
+                std::fclose(f);
             }
             std::vector<Game> games =
                 fetch_playable_titles(http, credentials.cloud);
