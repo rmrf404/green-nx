@@ -47,6 +47,11 @@ public:
     DeviceCode request_device_code();
     PollResult poll_device_code(const DeviceCode& code);
 
+    // When set, in-flight auth HTTP calls abort promptly once *flag becomes
+    // true. Lets the sign-in worker unblock at shutdown (same contract as
+    // Http::set_abort_flag).
+    void set_abort_flag(std::atomic<bool>* flag) { http_.set_abort_flag(flag); }
+
     // Full chain: refresh -> XSTS user token -> XSTS gssv authorize ->
     // per-offering streaming logins (xhome, xgpuweb, xgpuwebf2p).
     StreamingCredentials fetch_streaming_credentials();

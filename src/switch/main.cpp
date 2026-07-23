@@ -161,6 +161,7 @@ struct App {
     std::atomic<int> signin_state{0};  // 0 running, 1 ok, 2 restart, 3 error
     std::string signin_error;
     std::thread worker;
+    std::atomic<bool> abort_http{false};  // exit: unblock worker HTTP calls
 
     // library
     std::vector<Game> games;
@@ -338,8 +339,14 @@ void start_signin(App& app) {
             return;
         }
         while (app.signin_state == 0) {
-            SDL_Delay(static_cast<Uint32>(
-                std::max(app.device_code.interval_secs, 1) * 1000));
+            // Sleep in short slices so a cancel (exit) doesn't have to wait
+            // out the full poll interval (5-15 s) before the join returns.
+            Uint32 wait_ms = static_cast<Uint32>(
+                std::max(app.device_code.interval_secs, 1) * 1000);
+            for (Uint32 waited = 0; waited < wait_ms && app.signin_state == 0;
+                 waited += 100)
+                SDL_Delay(100);
+            if (app.signin_state != 0) return;
             try {
                 switch (app.auth->poll_device_code(app.device_code)) {
                     case PollResult::Authorized: app.signin_state = 1; return;
@@ -904,6 +911,7 @@ int main(int argc, char** argv) {
     SDL_Joystick* joystick = SDL_JoystickOpen(0);
     app.covers = std::make_unique<Covers>(app.gfx, data_path("covers"));
     app.auth = std::make_unique<XboxAuth>(data_path("tokens.json"));
+    app.auth->set_abort_flag(&app.abort_http);
     app.settings = load_settings();
     app.favorites = load_id_list("favorites.json");
     app.history = load_id_list("history.json");
@@ -938,6 +946,7 @@ int main(int argc, char** argv) {
             case Scene::SignIn:
                 if (input.b || input.plus) {
                     app.signin_state = 4;  // cancel
+                    app.abort_http = true;  // unblock an in-flight poll
                     join_worker(app);
                     running = false;
                     break;
@@ -1199,6 +1208,7 @@ int main(int argc, char** argv) {
     breadcrumb("--- exit begin");
 
     if (app.signin_state == 0) app.signin_state = 4;
+    app.abort_http = true;  // unblock any in-flight worker HTTP call
     join_worker(app);
     breadcrumb("workers joined");
 
