@@ -34,6 +34,10 @@ public:
     // POST /v5/sessions/cloud/play for a title.
     void start_cloud(const std::string& title_id);
 
+    // POST /v5/sessions/home/play against your own console (remote play).
+    // Use with the xhome offering's credentials, not the cloud ones.
+    void start_home(const std::string& server_id);
+
     SessionState refresh_state();
     SessionState state() const { return state_; }
     const std::string& error_details() const { return error_details_; }
@@ -56,8 +60,10 @@ public:
     void stop();
 
     // Closes any stale sessions left on the account (server allows only one).
+    // platform: "cloud" (xCloud) or "home" (own-console remote play).
     static void cleanup_stale_sessions(Http& http,
-                                       const EndpointCredentials& credentials);
+                                       const EndpointCredentials& credentials,
+                                       const std::string& platform = "cloud");
 
 private:
     std::string url(const std::string& suffix) const;

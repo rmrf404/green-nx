@@ -111,6 +111,18 @@ void Engine::log(const std::string& line) {
 
 void Engine::start(const std::string& title_id, QualityTier tier,
                    const std::string& locale) {
+    home_server_id_.clear();
+    start_common(title_id, tier, locale);
+}
+
+void Engine::start_home(const std::string& server_id, QualityTier tier,
+                        const std::string& locale) {
+    home_server_id_ = server_id;
+    start_common("(your console)", tier, locale);
+}
+
+void Engine::start_common(const std::string& title_id, QualityTier tier,
+                          const std::string& locale) {
     stop();
     title_id_ = title_id;
     tier_ = tier;
@@ -480,15 +492,22 @@ bool Engine::take_rumble(RumbleCommand& out) {
 
 void Engine::worker() {
     try {
-        set_status("Signing in to xCloud...");
-        cloud_ = auth_.fetch_streaming_credentials().cloud;
+        bool home = !home_server_id_.empty();
+        set_status(home ? "Signing in to your Xbox..."
+                        : "Signing in to xCloud...");
+        StreamingCredentials creds = auth_.fetch_streaming_credentials();
+        cloud_ = home ? creds.home : creds.cloud;
 
         set_status("Cleaning up old sessions...");
-        GssvSession::cleanup_stale_sessions(http_, cloud_);
+        GssvSession::cleanup_stale_sessions(http_, cloud_,
+                                            home ? "home" : "cloud");
 
         set_status("Requesting a session...");
         GssvSession session(http_, cloud_, tier_, locale_);
-        session.start_cloud(title_id_);
+        if (home)
+            session.start_home(home_server_id_);
+        else
+            session.start_cloud(title_id_);
 
         set_status("Waiting for a server...");
         bool connected = false;

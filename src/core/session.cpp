@@ -154,6 +154,35 @@ void GssvSession::start_cloud(const std::string& title_id) {
     state_ = SessionState::New;
 }
 
+// Same request shape as start_cloud, but on the home platform: the target is
+// a serverId (your console) instead of a titleId, and useIceConnection is on
+// -- home streaming negotiates a direct (local-network) path when possible.
+void GssvSession::start_home(const std::string& server_id) {
+    json body = {
+        {"clientSessionId", ""},
+        {"titleId", ""},
+        {"systemUpdateGroup", ""},
+        {"settings",
+         {{"nanoVersion", "V3;WebrtcTransport.dll"},
+          {"enableOptionalDataCollection", false},
+          {"enableTextToSpeech", false},
+          {"highContrast", 0},
+          {"locale", locale_},
+          {"useIceConnection", true},
+          {"timezoneOffsetMinutes", 120},
+          {"sdkType", "web"},
+          {"osName", os_name(tier_)}}},
+        {"serverId", server_id},
+        {"fallbackRegionNames", json::array()},
+    };
+    json response = parse_or_throw(
+        http_.post(credentials_.host + "/v5/sessions/home/play", body.dump(),
+                   headers()),
+        "home session start");
+    session_path_ = response.at("sessionPath");
+    state_ = SessionState::New;
+}
+
 SessionState GssvSession::refresh_state() {
     json response = parse_or_throw(http_.get(url("/state"), headers()),
                                    "session state");
@@ -315,11 +344,12 @@ void GssvSession::stop() {
 }
 
 void GssvSession::cleanup_stale_sessions(
-    Http& http, const EndpointCredentials& credentials) {
+    Http& http, const EndpointCredentials& credentials,
+    const std::string& platform) {
     GssvSession probe(http, credentials);
     try {
         json response = parse_or_throw(
-            http.get(credentials.host + "/v5/sessions/cloud/active",
+            http.get(credentials.host + "/v5/sessions/" + platform + "/active",
                      probe.headers()),
             "active sessions");
         std::vector<std::string> paths;

@@ -26,6 +26,33 @@ constexpr const char* kDeviceInfo =
 
 }  // namespace
 
+std::vector<HomeConsole> fetch_home_consoles(
+    Http& http, const EndpointCredentials& home) {
+    HttpResponse response =
+        http.get(home.host + "/v6/servers/home",
+                 {"Accept: application/json",
+                  "Content-Type: application/json",
+                  "X-Gssv-Client: XboxComBrowser", kDeviceInfo,
+                  "Authorization: Bearer " + home.token});
+    if (!response.ok())
+        throw std::runtime_error("console list failed with HTTP " +
+                                 std::to_string(response.status) + ": " +
+                                 response.body.substr(0, 300));
+
+    json parsed = json::parse(response.body, nullptr, false);
+    std::vector<HomeConsole> consoles;
+    if (parsed.is_discarded()) return consoles;
+    for (const json& entry : parsed.value("results", json::array())) {
+        HomeConsole console;
+        console.server_id = entry.value("serverId", "");
+        console.name = entry.value("serverName", "");
+        console.console_type = entry.value("consoleType", "");
+        console.power_state = entry.value("powerState", "");
+        if (!console.server_id.empty()) consoles.push_back(std::move(console));
+    }
+    return consoles;
+}
+
 std::vector<Game> fetch_playable_titles(Http& http,
                                         const EndpointCredentials& cloud) {
     HttpResponse response =

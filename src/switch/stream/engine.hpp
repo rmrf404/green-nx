@@ -47,6 +47,10 @@ public:
 
     void start(const std::string& title_id, QualityTier tier,
                const std::string& locale = "en-US");
+    // Remote play from your own console (xhome offering): the target is the
+    // console's serverId; the game is whatever the console runs.
+    void start_home(const std::string& server_id, QualityTier tier,
+                    const std::string& locale = "en-US");
     void stop();
 
     EngineState state() const { return state_; }
@@ -81,6 +85,8 @@ public:
     bool take_rumble(RumbleCommand& out);  // true if a fresh command was pending
 
 private:
+    void start_common(const std::string& title_id, QualityTier tier,
+                      const std::string& locale);
     void worker();
     void decode_loop();  // Switch: dedicated H.264 decode thread (see engine.cpp)
     void run_peer(GssvSession& session);
@@ -116,6 +122,7 @@ private:
 
     EndpointCredentials cloud_;
     std::string title_id_;
+    std::string home_server_id_;  // non-empty selects the home (xhome) path
     QualityTier tier_ = QualityTier::P1080HQ;
     std::string locale_ = "en-US";  // streamed console's system language
 public:

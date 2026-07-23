@@ -26,4 +26,18 @@ void fetch_names(Http& http, std::vector<Game>& games,
                  const std::string& market = "US",
                  const std::string& language = "en-US");
 
+// An Xbox console linked to the account, streamable over xHome (remote play).
+struct HomeConsole {
+    std::string server_id;     // target for GssvSession::start_home
+    std::string name;          // user-given console name
+    std::string console_type;  // e.g. "XboxSeriesX"
+    std::string power_state;   // e.g. "On", "ConnectedStandby"
+};
+
+// Consoles the account can remote-play, from the xhome offering's /v6/servers/
+// home. Use the xhome credentials (StreamingCredentials.home), not the cloud
+// ones. Empty result = feature stays hidden in the UI.
+std::vector<HomeConsole> fetch_home_consoles(
+    Http& http, const EndpointCredentials& home);
+
 }  // namespace gnx
