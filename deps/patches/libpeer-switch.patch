@@ -240,7 +240,7 @@ index 94905a8..1d204ff 100644
  
  #define CONFIG_IPV6 0
 diff --git a/src/peer_connection.c b/src/peer_connection.c
-index c763e80..47f677c 100644
+index c763e80..cecbe66 100644
 --- a/src/peer_connection.c
 +++ b/src/peer_connection.c
 @@ -45,6 +45,10 @@ struct PeerConnection {
@@ -478,7 +478,34 @@ index c763e80..47f677c 100644
    return rtrn;
  }
  
-@@ -365,7 +558,9 @@ int peer_connection_loop(PeerConnection* pc) {
+@@ -342,6 +535,26 @@ int peer_connection_loop(PeerConnection* pc) {
+             rtp_decoder_decode(&pc->artp_decoder, pc->agent_buf, pc->agent_ret);
+           } else if (ssrc == pc->remote_vssrc) {
+             rtp_decoder_decode(&pc->vrtp_decoder, pc->agent_buf, pc->agent_ret);
++          } else {
++            // Fallback demux by RTP payload type. libpeer normally routes media
++            // by SSRC, learned from the answer's "a=ssrc:" lines. A home Xbox
++            // console sometimes omits a=ssrc for the audio m-section, leaving
++            // remote_assrc = 0, so every Opus packet (nonzero SSRC) matched
++            // neither branch and was dropped -> no console audio. This offer
++            // bundles exactly one recvonly audio (PT 111) and one video
++            // (PT 102) stream (see sdp.c), so demux the stray packet by its
++            // payload type and latch its SSRC; the next packet then takes the
++            // fast path above.
++            uint8_t pt = pc->agent_buf[1] & 0x7f;
++            if (pt == 111) {
++              LOGI("audio SSRC %" PRIu32 " latched by PT (no a=ssrc in answer)", ssrc);
++              pc->remote_assrc = ssrc;
++              rtp_decoder_decode(&pc->artp_decoder, pc->agent_buf, pc->agent_ret);
++            } else if (pt == 102) {
++              LOGI("video SSRC %" PRIu32 " latched by PT (no a=ssrc in answer)", ssrc);
++              pc->remote_vssrc = ssrc;
++              rtp_decoder_decode(&pc->vrtp_decoder, pc->agent_buf, pc->agent_ret);
++            }
+           }
+ 
+         } else {
+@@ -365,7 +578,9 @@ int peer_connection_loop(PeerConnection* pc) {
        break;
    }
  
@@ -489,7 +516,7 @@ index c763e80..47f677c 100644
  }
  
  void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp, SdpType type) {
-@@ -432,7 +627,11 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
+@@ -432,7 +647,11 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
  
    switch (sdp_type) {
      case SDP_TYPE_OFFER:
