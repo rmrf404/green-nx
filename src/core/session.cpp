@@ -65,10 +65,23 @@ json parse_or_throw(const HttpResponse& response, const char* label) {
     return parsed;
 }
 
+// Home consoles attach an errorDetails object with all-null fields to
+// perfectly good responses (the answer rides right alongside it); only a
+// non-null field inside errorDetails is a real failure.
+bool is_real_exchange_error(const json& value) {
+    if (!value.contains("errorDetails") || value["errorDetails"].is_null())
+        return false;
+    const json& details = value["errorDetails"];
+    if (!details.is_object()) return true;
+    for (const auto& item : details.items())
+        if (!item.value().is_null()) return true;
+    return false;
+}
+
 void throw_on_exchange_error(const json& value, const char* label) {
-    if (value.contains("errorDetails") && !value["errorDetails"].is_null())
+    if (is_real_exchange_error(value))
         throw std::runtime_error(std::string(label) + ": " +
-                                 value["errorDetails"].dump());
+                                 value.dump().substr(0, 400));
 }
 
 // A Teredo IPv6 address (RFC 4380) embeds the node's public IPv4 address and
@@ -236,23 +249,7 @@ std::string GssvSession::exchange_sdp(const std::string& offer_sdp) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
-        if (response.contains("errorDetails") &&
-            !response["errorDetails"].is_null()) {
-            // Home consoles have been seen posting an errorDetails object
-            // with all-null fields while the streaming service spins up;
-            // give that a few polls before treating it as a rejection, and
-            // when it IS one, surface the whole response for diagnosis.
-            const json& details = response["errorDetails"];
-            bool all_null = details.is_object();
-            for (const auto& item : details.items())
-                if (!item.value().is_null()) { all_null = false; break; }
-            if (all_null && attempt < 12) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                continue;
-            }
-            throw std::runtime_error("sdp exchange: " +
-                                     response.dump().substr(0, 400));
-        }
+        throw_on_exchange_error(response, "sdp exchange");
         std::string exchange = response.value("exchangeResponse", "");
         json parsed = json::parse(exchange, nullptr, false);
         if (parsed.is_discarded() || !parsed.contains("sdp"))
