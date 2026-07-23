@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <deko3d.hpp>
@@ -22,6 +23,11 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
 }
+
+// Forward-declared to keep SDL_ttf out of this header (it's a plain pointer
+// member here; the full type comes from SDL_ttf.h in the .cpp).
+struct _TTF_Font;
+typedef struct _TTF_Font TTF_Font;
 
 namespace gnx::stream {
 
@@ -94,6 +100,9 @@ private:
     FrameMapping* map_frame(AVFrame* frame, void* base, uint32_t handle,
                             uint32_t size);  // zero-copy import (cached)
     void update_transform(AVFrame* frame);
+    void update_hud(AVFrame* frame);   // recompute stats, re-rasterize on change
+    void rasterize_hud();              // compose panel bg + text into hud_cpu_
+    void blit_text(const char* s, int x, int y);  // white text onto hud_pixels_
 
     LogFn log_;
     bool initialized_ = false;
@@ -142,6 +151,21 @@ private:
     bool warned_not_hw_ = false;
     bool logged_surface_ = false;
     bool hud_enabled_ = true;  // draw the debug HUD overlay pass
+
+    // Debug HUD text (stage 1): stats composited on the CPU into a pitch-linear
+    // RGBA texture, sampled by hud_fsh_ in the overlay pass.
+    static constexpr uint32_t kHudTexW = 512;
+    static constexpr uint32_t kHudTexH = 160;
+    TTF_Font* hud_font_ = nullptr;
+    dk::UniqueMemBlock hud_memblock_;
+    dk::Image hud_image_;
+    dk::ImageDescriptor hud_desc_;
+    void* hud_cpu_ = nullptr;
+    std::vector<uint32_t> hud_pixels_;   // CPU compose buffer (kHudTexW*kHudTexH)
+    std::string hud_text_cache_;         // last rasterized text (skip if unchanged)
+    uint64_t fps_tick_ = 0;              // armGetSystemTick at last FPS sample
+    int fps_frames_ = 0;
+    float fps_ = 0.0f;
 };
 
 }  // namespace gnx::stream
