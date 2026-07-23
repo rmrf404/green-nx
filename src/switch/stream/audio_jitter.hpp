@@ -21,6 +21,18 @@ public:
     // false if we should wait for more. Call in a loop after each push().
     bool pop(std::vector<uint8_t>& out);
 
+    // Clear all state for reuse on a fresh RTP stream. The AudioPlayer is reused
+    // across streams (Engine owns it); without this the previous stream's
+    // next_seq_ persists, and since RTP randomizes the starting sequence number
+    // the RFC1982 "too late" test in push() can drop the ENTIRE new stream ->
+    // intermittent no-audio that only clears on reconnect. Call from init().
+    void reset() {
+        pending_.clear();
+        next_seq_ = 0;
+        have_next_ = false;
+        lost_ = 0;
+    }
+
     // Cumulative count of packets skipped as lost (a gap we gave up waiting on).
     uint32_t lost() const { return lost_; }
 
