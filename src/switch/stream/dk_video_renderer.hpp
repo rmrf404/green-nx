@@ -10,6 +10,7 @@
 // The owner suspends SDL (Gfx::suspend) before init() and resumes it after
 // shutdown(); during streaming deko3d owns the framebuffer exclusively.
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdint>
 #include <functional>
@@ -51,6 +52,15 @@ public:
 
     // Enable/disable the debug HUD overlay pass (drawn on top of the video).
     void set_hud_enabled(bool e) { hud_enabled_ = e; }
+
+    // Live network stats for the HUD, fed once per second from the streaming
+    // worker thread (stored atomically; read on the render thread).
+    void set_net_stats(float mbps, float loss_pct, int buffer_ms) {
+        net_mbps_.store(mbps, std::memory_order_relaxed);
+        net_loss_.store(loss_pct, std::memory_order_relaxed);
+        net_buffer_ms_.store(buffer_ms, std::memory_order_relaxed);
+        net_valid_.store(true, std::memory_order_relaxed);
+    }
 
     // Bring up the deko3d device/swapchain. Call after SDL has released the
     // window. Returns false (and logs) on failure.
@@ -166,6 +176,10 @@ private:
     uint64_t fps_tick_ = 0;              // armGetSystemTick at last FPS sample
     int fps_frames_ = 0;
     float fps_ = 0.0f;
+    std::atomic<float> net_mbps_{0.0f};   // set by Engine worker, read by update_hud
+    std::atomic<float> net_loss_{0.0f};
+    std::atomic<int> net_buffer_ms_{0};
+    std::atomic<bool> net_valid_{false};
 };
 
 }  // namespace gnx::stream

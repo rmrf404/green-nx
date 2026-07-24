@@ -531,9 +531,18 @@ void DkVideoRenderer::update_hud(AVFrame* frame) {
         fps_frames_ = 0;
         fps_tick_ = now;
     }
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%dx%d\n%.0f fps", frame->width,
-                  frame->height, fps_);
+    char buf[160];
+    if (net_valid_.load(std::memory_order_relaxed)) {
+        std::snprintf(buf, sizeof(buf),
+                      "%dx%d\n%.0f fps  %.1f Mbps\nloss %.1f%%  buf %dms",
+                      frame->width, frame->height, fps_,
+                      net_mbps_.load(std::memory_order_relaxed),
+                      net_loss_.load(std::memory_order_relaxed),
+                      net_buffer_ms_.load(std::memory_order_relaxed));
+    } else {
+        std::snprintf(buf, sizeof(buf), "%dx%d\n%.0f fps", frame->width,
+                      frame->height, fps_);
+    }
     if (hud_text_cache_ == buf) return;  // unchanged -> keep the current texture
     hud_text_cache_ = buf;
     rasterize_hud();

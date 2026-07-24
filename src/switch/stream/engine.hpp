@@ -179,6 +179,7 @@ private:
     std::condition_variable video_cv_;  // wakes decode_loop when an AU arrives
     std::deque<std::vector<uint8_t>> video_queue_;
     std::atomic<bool> got_frame_{false};
+    std::atomic<uint64_t> video_bytes_{0};  // RTP video bytes rx (HUD bitrate)
 
     // Decoded-frame handoff (Switch): decode_thread_ decodes into shared_frame_;
     // the render thread (pump_video) takes its own ref into present_frame_ so it
