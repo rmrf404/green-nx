@@ -111,6 +111,18 @@ void Engine::log(const std::string& line) {
 
 void Engine::start(const std::string& title_id, QualityTier tier,
                    const std::string& locale) {
+    home_server_id_.clear();
+    start_common(title_id, tier, locale);
+}
+
+void Engine::start_home(const std::string& server_id, QualityTier tier,
+                        const std::string& locale) {
+    home_server_id_ = server_id;
+    start_common("(your console)", tier, locale);
+}
+
+void Engine::start_common(const std::string& title_id, QualityTier tier,
+                          const std::string& locale) {
     stop();
     title_id_ = title_id;
     tier_ = tier;
@@ -480,37 +492,77 @@ bool Engine::take_rumble(RumbleCommand& out) {
 
 void Engine::worker() {
     try {
-        set_status("Signing in to xCloud...");
-        cloud_ = auth_.fetch_streaming_credentials().cloud;
+        bool home = !home_server_id_.empty();
+        set_status(home ? "Signing in to your Xbox..."
+                        : "Signing in to xCloud...");
+        StreamingCredentials creds = auth_.fetch_streaming_credentials();
+        cloud_ = home ? creds.home : creds.cloud;
 
         set_status("Cleaning up old sessions...");
-        GssvSession::cleanup_stale_sessions(http_, cloud_);
+        GssvSession::cleanup_stale_sessions(http_, cloud_,
+                                            home ? "home" : "cloud");
 
-        set_status("Requesting a session...");
-        GssvSession session(http_, cloud_, tier_, locale_);
-        session.start_cloud(title_id_);
+        // Home streaming: a session request against a sleeping console acts
+        // as the wake-up call but fails with AgentCommandError while the
+        // console boots its streaming service (same behaviour Greenlight
+        // sees). Retry a few times before surfacing the failure.
+        int attempts = home ? 4 : 1;
+        for (int attempt = 0; attempt < attempts && !quit_; ++attempt) {
+            if (attempt > 0) {
+                set_status("Waking your console... (attempt " +
+                           std::to_string(attempt + 1) + " of " +
+                           std::to_string(attempts) + ")");
+                for (int i = 0; i < 50 && !quit_; ++i)  // ~5 s between tries
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(100));
+                if (quit_) break;
+            }
+            set_status("Requesting a session...");
+            // Home: the console agent only accepts the android fingerprint
+            // (green-vita, the working reference, always sends it) -- the
+            // windows/tizen quality-tier fingerprints get AgentCommandError.
+            GssvSession session(http_, cloud_,
+                                home ? QualityTier::P720 : tier_, locale_);
+            if (home)
+                session.start_home(home_server_id_);
+            else
+                session.start_cloud(title_id_);
 
-        set_status("Waiting for a server...");
-        bool connected = false;
-        for (int i = 0; i < 300 && !quit_; ++i) {
-            SessionState state = session.refresh_state();
-            if (state == SessionState::ReadyToConnect && !connected) {
-                set_status("Authenticating...");
-                session.connect(auth_.fetch_passport_token());
-                connected = true;
-            } else if (state == SessionState::Provisioned) {
-                run_peer(session);
-                session.stop();
-                return;
-            } else if (state == SessionState::Failed) {
-                fail("Session failed: " + session.error_details());
-                session.stop();
+            set_status("Waiting for a server...");
+            bool connected = false;
+            std::string session_error;
+            for (int i = 0; i < 300 && !quit_; ++i) {
+                SessionState state = session.refresh_state();
+                if (state == SessionState::ReadyToConnect && !connected) {
+                    set_status("Authenticating...");
+                    session.connect(auth_.fetch_passport_token());
+                    connected = true;
+                } else if (state == SessionState::Provisioned) {
+                    run_peer(session);
+                    session.stop();
+                    return;
+                } else if (state == SessionState::Failed) {
+                    session_error = session.error_details();
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(700));
+            }
+            session.stop();
+            if (quit_) return;
+            bool agent_error =
+                session_error.find("AgentCommandError") != std::string::npos;
+            if (session_error.empty()) {
+                fail("Timed out waiting for a session");
                 return;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(700));
+            log("session attempt " + std::to_string(attempt + 1) +
+                " failed: " + session_error);
+            if (!agent_error || attempt == attempts - 1) {
+                fail("Session failed: " + session_error);
+                return;
+            }
+            // AgentCommandError on home: console still waking -> retry.
         }
-        session.stop();
-        if (!quit_) fail("Timed out waiting for a session");
     } catch (const std::exception& error) {
         fail(error.what());
     }
@@ -563,10 +615,19 @@ void Engine::run_peer(GssvSession& session) {
     // No b=AS/TIAS lines: working clients don't send them; the bitrate cap is
     // declared via clientdevicecapabilities.maxBitrateKbps instead.
     std::string munged = sdp_force_stereo(offer);  // no-op safety net
-    // 720p tier ships the template verbatim (proven accepted); 1080p tiers
-    // scale the declared decode capability to 1080p60.
-    if (tier_ != QualityTier::P720)
+    bool home = !home_server_id_.empty();
+    if (home) {
+        // Home offer mirrors green-vita (the working reference) exactly:
+        // 720p caps verbatim and H264 level 3.2 (42e020) instead of 3.1 --
+        // the console agent is stricter than the xCloud servers.
+        size_t at = munged.find("profile-level-id=42e01f");
+        if (at != std::string::npos) munged.replace(at + 17, 6, "42e020");
+        log("home offer sdp:\n" + munged);
+    } else if (tier_ != QualityTier::P720) {
+        // 720p tier ships the template verbatim (proven accepted); 1080p
+        // tiers scale the declared decode capability to 1080p60.
         munged = sdp_scale_video_caps_1080(munged);
+    }
     // Pass the answer to libpeer VERBATIM. Never rewrite it: the server has
     // already chosen the codec, and any reserialization risks corrupting the
     // CRLF line endings, which would make libpeer parse the ICE ufrag/pwd with

@@ -65,10 +65,23 @@ json parse_or_throw(const HttpResponse& response, const char* label) {
     return parsed;
 }
 
+// Home consoles attach an errorDetails object with all-null fields to
+// perfectly good responses (the answer rides right alongside it); only a
+// non-null field inside errorDetails is a real failure.
+bool is_real_exchange_error(const json& value) {
+    if (!value.contains("errorDetails") || value["errorDetails"].is_null())
+        return false;
+    const json& details = value["errorDetails"];
+    if (!details.is_object()) return true;
+    for (const auto& item : details.items())
+        if (!item.value().is_null()) return true;
+    return false;
+}
+
 void throw_on_exchange_error(const json& value, const char* label) {
-    if (value.contains("errorDetails") && !value["errorDetails"].is_null())
+    if (is_real_exchange_error(value))
         throw std::runtime_error(std::string(label) + ": " +
-                                 value["errorDetails"].dump());
+                                 value.dump().substr(0, 400));
 }
 
 // A Teredo IPv6 address (RFC 4380) embeds the node's public IPv4 address and
@@ -150,6 +163,37 @@ void GssvSession::start_cloud(const std::string& title_id) {
         http_.post(credentials_.host + "/v5/sessions/cloud/play", body.dump(),
                    headers()),
         "session start");
+    session_path_ = response.at("sessionPath");
+    state_ = SessionState::New;
+}
+
+// Same request shape as start_cloud, but on the home platform: the target is
+// a serverId (your console) instead of a titleId. Field values mirror
+// green-vita's working home client exactly -- in particular
+// useIceConnection stays false; true makes the console agent reject the
+// start with AgentCommandError.
+void GssvSession::start_home(const std::string& server_id) {
+    json body = {
+        {"clientSessionId", ""},
+        {"titleId", ""},
+        {"systemUpdateGroup", ""},
+        {"settings",
+         {{"nanoVersion", "V3;WebrtcTransport.dll"},
+          {"enableOptionalDataCollection", false},
+          {"enableTextToSpeech", false},
+          {"highContrast", 0},
+          {"locale", locale_},
+          {"useIceConnection", false},
+          {"timezoneOffsetMinutes", 120},
+          {"sdkType", "web"},
+          {"osName", os_name(tier_)}}},
+        {"serverId", server_id},
+        {"fallbackRegionNames", json::array()},
+    };
+    json response = parse_or_throw(
+        http_.post(credentials_.host + "/v5/sessions/home/play", body.dump(),
+                   headers()),
+        "home session start");
     session_path_ = response.at("sessionPath");
     state_ = SessionState::New;
 }
@@ -315,11 +359,14 @@ void GssvSession::stop() {
 }
 
 void GssvSession::cleanup_stale_sessions(
-    Http& http, const EndpointCredentials& credentials) {
-    GssvSession probe(http, credentials);
+    Http& http, const EndpointCredentials& credentials,
+    const std::string& platform) {
+    GssvSession probe(http, credentials,
+                      platform == "home" ? QualityTier::P720
+                                         : QualityTier::P1080HQ);
     try {
         json response = parse_or_throw(
-            http.get(credentials.host + "/v5/sessions/cloud/active",
+            http.get(credentials.host + "/v5/sessions/" + platform + "/active",
                      probe.headers()),
             "active sessions");
         std::vector<std::string> paths;

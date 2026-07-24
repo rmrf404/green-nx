@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -55,11 +56,12 @@ enum JoyButton {
 };
 
 enum class Scene {
-    Splash, SignIn, LoadingLibrary, Library, Detail, Settings, Stream, Fatal
+    Splash, SignIn, LoadingLibrary, Library, Detail, SourcePicker, Settings,
+    Stream, Fatal
 };
 
-enum class LibraryTab { All, Favorites, History };
-constexpr int kTabCount = 3;
+enum class LibraryTab { All, Favorites, History, Consoles };
+constexpr int kTabCount = 4;  // Consoles only shows with a linked console
 constexpr int kHistoryMax = 10;  // recently-played games kept
 
 #ifdef __SWITCH__
@@ -138,6 +140,7 @@ struct Settings {
     int vibration = 2;  // rumble intensity: 0=Off, 1=Low, 2=Medium, 3=High
     int region = 0;     // region-bypass IP: 0=Off, else index into kRegion*
     int language = 0;   // index into kLanguage* (0 = English US)
+    int source = 0;     // 0=ask every time, 1=xCloud, 2=your Xbox
 };
 
 constexpr int kLanguageCount = 14;
@@ -179,7 +182,14 @@ struct App {
     int settings_cursor = 0;
     Scene settings_return = Scene::Library;  // scene to go back to from Settings
     int detail_index = -1;   // games[] index shown in Scene::Detail
-    int detail_cursor = 0;   // 0 = Play, 1 = favorite toggle
+    int detail_cursor = 0;   // 0 = Play, 1 = favorite, 2 = Play on... (if any)
+    std::vector<HomeConsole> consoles;  // linked Xboxes; empty = hide feature
+    bool launching_home = false;        // what the current stream targets
+    int console_cursor = 0;             // selected console (list + launches)
+    int pick_cursor = 0;                // SourcePicker: 0 xCloud, 1 your Xbox
+    Uint32 pick_a_since = 0;            // SourcePicker: A held since (hold=default)
+    bool pick_pending = false;          // SourcePicker: A press awaiting release
+    std::string last_exit_step;         // previous run's last exit breadcrumb
 
 #ifdef GNX_NATIVE_STREAM
     std::unique_ptr<stream::Engine> engine;
@@ -209,6 +219,7 @@ Settings load_settings() {
     settings.region = std::clamp(data.value("region", 0), 0, 5);
     settings.language =
         std::clamp(data.value("language", 0), 0, kLanguageCount - 1);
+    settings.source = std::clamp(data.value("source", 0), 0, 2);
     return settings;
 }
 
@@ -218,7 +229,8 @@ void save_settings(const Settings& settings) {
                 {"mapping", settings.mapping},
                 {"vibration", settings.vibration},
                 {"region", settings.region},
-                {"language", settings.language}}.dump(2);
+                {"language", settings.language},
+                {"source", settings.source}}.dump(2);
 }
 
 // Streamed console's system language (BCP-47). Games without an in-game
@@ -285,6 +297,36 @@ std::vector<Game> load_games_cache() {
         if (!game.title_id.empty()) games.push_back(std::move(game));
     }
     return games;
+}
+
+// Linked consoles are cached like the games list, so the source picker is
+// available on cache-served boots too; refreshed on every full library load.
+void save_consoles_cache(const std::vector<HomeConsole>& consoles) {
+    json list = json::array();
+    for (const HomeConsole& console : consoles)
+        list.push_back({{"serverId", console.server_id},
+                        {"name", console.name},
+                        {"consoleType", console.console_type},
+                        {"powerState", console.power_state}});
+    std::ofstream out(data_path("consoles.json"), std::ios::trunc);
+    out << json{{"consoles", list}}.dump();
+}
+
+std::vector<HomeConsole> load_consoles_cache() {
+    std::vector<HomeConsole> consoles;
+    std::ifstream in(data_path("consoles.json"));
+    if (!in) return consoles;
+    json data = json::parse(in, nullptr, false);
+    if (data.is_discarded() || !data.is_object()) return consoles;
+    for (const json& entry : data.value("consoles", json::array())) {
+        HomeConsole console;
+        console.server_id = entry.value("serverId", "");
+        console.name = entry.value("name", "");
+        console.console_type = entry.value("consoleType", "");
+        console.power_state = entry.value("powerState", "");
+        if (!console.server_id.empty()) consoles.push_back(std::move(console));
+    }
+    return consoles;
 }
 
 // Favorites and history are stored as plain title-id lists (JSON arrays).
@@ -373,6 +415,7 @@ void start_library_load(App& app, bool force_refresh) {
                 std::vector<Game> cached = load_games_cache();
                 if (!cached.empty()) {
                     app.games = std::move(cached);
+                    app.consoles = load_consoles_cache();
                     app.load_state = 1;
                     return;
                 }
@@ -382,6 +425,29 @@ void start_library_load(App& app, bool force_refresh) {
                 app.auth->fetch_streaming_credentials();
             app.status = "Loading your library...";
             Http http;
+            // Linked consoles for xHome remote play. Non-fatal: no consoles
+            // (or an error here) just leaves the source picker hidden. The
+            // outcome lands in consoles-log.txt so "option not showing" is
+            // diagnosable from the SD card.
+            std::string console_log;
+            try {
+                app.consoles = fetch_home_consoles(http, credentials.home);
+                save_consoles_cache(app.consoles);
+                console_log = "found " + std::to_string(app.consoles.size()) +
+                              " console(s)";
+                for (const HomeConsole& c : app.consoles)
+                    console_log += "\n  " + c.name + " [" + c.console_type +
+                                   "] power=" + c.power_state;
+            } catch (const std::exception& error) {
+                app.consoles.clear();
+                console_log = std::string("console list failed: ") +
+                              error.what();
+            }
+            if (FILE* f = std::fopen(data_path("consoles-log.txt").c_str(),
+                                     "w")) {
+                std::fprintf(f, "%s\n", console_log.c_str());
+                std::fclose(f);
+            }
             std::vector<Game> games =
                 fetch_playable_titles(http, credentials.cloud);
             app.status = "Resolving names and covers (" +
@@ -434,7 +500,9 @@ void apply_filter(App& app) {
                lowercase(game.title_id).find(needle) != std::string::npos;
     };
 
-    if (app.tab == LibraryTab::History) {
+    if (app.tab == LibraryTab::Consoles) {
+        return;  // the Consoles tab lists consoles, not games
+    } else if (app.tab == LibraryTab::History) {
         for (const std::string& id : app.history) {
             int i = find_game(app, id);
             if (i >= 0 && matches(app.games[i])) app.visible.push_back(i);
@@ -695,11 +763,39 @@ constexpr int kGridX = 170;
 constexpr int kGridY = 220;
 constexpr int kRowsVisible = 2;
 
-const char* kTabNames[kTabCount] = {"All games", "Favorites", "History"};
+const char* kTabNames[kTabCount] = {"All games", "Favorites", "History",
+                                    "Consoles"};
 
 const char* kQualityLabels[3] = {"720p", "1080p", "1080p high bitrate"};
 const char* kMappingLabels[2] = {"Positional (Switch A = Xbox B)",
                                  "Match labels (Switch A = Xbox A)"};
+
+const HomeConsole& selected_console(const App& app) {
+    return app.consoles[std::clamp(
+        app.console_cursor, 0, static_cast<int>(app.consoles.size()) - 1)];
+}
+
+std::string console_label(const App& app) {
+    if (app.consoles.empty()) return "Your Xbox";
+    const HomeConsole& console = selected_console(app);
+    return console.name.empty() ? "Your Xbox" : console.name;
+}
+
+// Start the stream against the chosen target. launch_game must already be
+// set (a game for xCloud; a pseudo-entry named after the console for home).
+void launch_stream(App& app, bool home) {
+    app.launching_home = home && !app.consoles.empty();
+#ifdef GNX_NATIVE_STREAM
+    QualityTier tier = static_cast<QualityTier>(app.settings.quality);
+    const char* locale = kLanguageCodes[app.settings.language];
+    if (app.launching_home)
+        app.engine->start_home(selected_console(app).server_id, tier, locale);
+    else
+        app.engine->start(app.launch_game.title_id, tier, locale);
+    app.stream_hint_until = SDL_GetTicks() + 8000;
+    app.scene = Scene::Stream;
+#endif
+}
 
 // Skeleton shades: each card one step darker, hinting at content loading in.
 const gfx::Color kSkeleton[6] = {{22, 27, 36}, {20, 24, 33}, {18, 21, 29},
@@ -774,21 +870,68 @@ void draw_empty_state(App& app, const std::string& glyph, gfx::Color glyph_col,
 }
 
 void draw_library(App& app) {
-    // Row 1: identity (logo left, gamertag right).
+    // Row 1: identity (logo left, gamertag + source chip right). The source
+    // chip only exists when a console is linked (card 1e visibility rule).
     draw_header(app);
-    if (!app.gamertag.empty())
-        app.gfx.text(app.gamertag,
-                     gfx::kWidth - kMargin -
-                         app.gfx.text_width(app.gamertag,
-                                            gfx::FontSize::Small),
-                     56, gfx::FontSize::Small, gfx::kTextDim);
+    int right = gfx::kWidth - kMargin;
+    if (!app.gamertag.empty()) {
+        int gt_w = app.gfx.text_width(app.gamertag, gfx::FontSize::Small);
+        app.gfx.text(app.gamertag, right - gt_w, 56, gfx::FontSize::Small,
+                     gfx::kTextDim);
+        right -= gt_w + 28;
+    }
+    if (!app.consoles.empty()) {
+        std::string label =
+            app.settings.source == 2
+                ? console_label(app)
+                : std::string("xCloud · ") +
+                      kQualityLabels[app.settings.quality];
+        int lw = app.gfx.text_width(label, gfx::FontSize::Small);
+        SDL_Rect chip = {right - (lw + 64), 48, lw + 64, 44};
+        app.gfx.fill(chip, gfx::kSurface);
+        app.gfx.fill({chip.x + 20, chip.y + 16, 12, 12}, gfx::kFocus);
+        app.gfx.text(label, chip.x + 44, chip.y + 6, gfx::FontSize::Small,
+                     gfx::kText);
+    }
+
+    // Consoles tab: one card per linked Xbox — pick one to stream.
+    auto draw_console_cards = [&app]() {
+        for (int i = 0; i < static_cast<int>(app.consoles.size()) && i < 3;
+             ++i) {
+            const HomeConsole& console = app.consoles[i];
+            bool focused = i == app.console_cursor;
+            SDL_Rect card = {kGridX + i * (560 + 56), 300, 560, 380};
+            app.gfx.fill(card, focused ? gfx::kSurfaceHi : gfx::kSurface);
+            SDL_Rect icon = {card.x + 48, card.y + 56, 72, 72};
+            app.gfx.fill(icon, focused ? gfx::kAccent : gfx::kChip);
+            if (!focused) app.gfx.frame(icon, gfx::kChipEdge, 2);
+            app.gfx.text_centered("⌂", icon.x + 36, icon.y + 14,
+                                  gfx::FontSize::Body,
+                                  focused ? gfx::kText : gfx::kTextDim);
+            app.gfx.text(console.name.empty() ? "Your Xbox" : console.name,
+                         card.x + 48, card.y + 164, gfx::FontSize::Body,
+                         gfx::kText);
+            app.gfx.text("Remote play from", card.x + 48, card.y + 220,
+                         gfx::FontSize::Note, gfx::kTextDim);
+            app.gfx.text(console.console_type, card.x + 48, card.y + 260,
+                         gfx::FontSize::Note, gfx::kTextDim);
+            bool on = console.power_state == "On";
+            app.gfx.fill({card.x + 48, card.y + 322, 12, 12},
+                         on ? gfx::kFocus : gfx::kWarn);
+            app.gfx.text(console.power_state + " · local network",
+                         card.x + 72, card.y + 312, gfx::FontSize::Small,
+                         gfx::kTextDim);
+            if (focused) draw_focus_frames(app, card);
+        }
+    };
 
     // Row 2: navigation — L/R chips hugging the tabs (the hint lives where it
     // acts), active tab kText + 5px accent underline, idle tabs kFaint.
     int tx = kGridX;
     draw_chip(app, "L", tx, 128, false);
     tx += chip_width(app, "L") + 44;
-    for (int t = 0; t < kTabCount; ++t) {
+    int tabs = app.consoles.empty() ? 3 : kTabCount;
+    for (int t = 0; t < tabs; ++t) {
         bool active = static_cast<int>(app.tab) == t;
         int w = app.gfx.text(kTabNames[t], tx, 124, gfx::FontSize::Body,
                              active ? gfx::kText : gfx::kFaint);
@@ -796,6 +939,24 @@ void draw_library(App& app) {
         tx += w + 44;
     }
     draw_chip(app, "R", tx, 128, false);
+
+    if (app.tab == LibraryTab::Consoles) {
+        std::string info =
+            std::to_string(app.consoles.size()) +
+            (app.consoles.size() == 1 ? " console" : " consoles");
+        app.gfx.text(info,
+                     gfx::kWidth - kGridX -
+                         app.gfx.text_width(info, gfx::FontSize::Small),
+                     138, gfx::FontSize::Small, gfx::kFaint);
+        draw_console_cards();
+        draw_hints(app, {{"A", "Connect", true},
+                         {"L R", "Tabs"},
+                         {"ZR", "Refresh"},
+                         {"ZL", "Settings"},
+                         {"−", "Sign out"},
+                         {"+", "Exit"}});
+        return;
+    }
 
     std::string info = std::to_string(app.visible.size()) + " games";
     if (!app.query.empty()) info += "  ·  \"" + app.query + "\"";
@@ -895,7 +1056,8 @@ void draw_detail(App& app) {
     if (fav) meta_chip("★ Favorite", gfx::kWarn);
 
     // Action buttons, 640 wide. Buttons don't scale on focus — only
-    // border+glow (and the primary keeps its accent fill).
+    // border+glow (and the primary keeps its accent fill). "Play on…" is
+    // drawn only with a linked console (card 1f visibility rule).
     const char* fav_label = fav ? "★ Remove favorite" : "★ Add favorite";
     SDL_Rect play = {rx, 400, 640, 96};
     app.gfx.fill(play, gfx::kAccent);
@@ -905,12 +1067,90 @@ void draw_detail(App& app) {
     app.gfx.fill(favbtn, gfx::kSurface);
     app.gfx.text_centered(fav_label, favbtn.x + 320, favbtn.y + 24,
                           gfx::FontSize::Body, gfx::kText);
-    draw_focus_frames(app, app.detail_cursor == 0 ? play : favbtn);
+    SDL_Rect source = {rx, 640, 640, 96};
+    if (!app.consoles.empty()) {
+        app.gfx.fill(source, gfx::kSurface);
+        app.gfx.text("Play on…", source.x + 44, source.y + 24,
+                     gfx::FontSize::Body, gfx::kText);
+        std::string target = app.settings.source == 2   ? console_label(app)
+                             : app.settings.source == 1 ? "xCloud"
+                                                        : "Ask every time";
+        app.gfx.text(target,
+                     source.x + source.w - 44 -
+                         app.gfx.text_width(target, gfx::FontSize::Body),
+                     source.y + 24, gfx::FontSize::Body, gfx::kTextDim);
+    }
+    SDL_Rect focused = app.detail_cursor == 0   ? play
+                       : app.detail_cursor == 1 ? favbtn
+                                                : source;
+    draw_focus_frames(app, focused);
 
     app.gfx.text("Streams in your account's language · change in Settings",
-                 rx, 680, gfx::FontSize::Small, gfx::kFaint);
+                 rx, app.consoles.empty() ? 680 : 792, gfx::FontSize::Small,
+                 gfx::kFaint);
 
     draw_hints(app, {{"A", "Select", true}, {"B", "Back"}});
+}
+
+// Source picker (card 1k): shown on Play when a console is linked and no
+// default source was fixed. Hold A on a card to make it the default and
+// skip this screen from then on.
+void draw_source_picker(App& app) {
+    const std::string& game =
+        app.launch_game.name.empty() ? app.launch_game.title_id
+                                     : app.launch_game.name;
+    app.gfx.text_centered("Play " + game.substr(0, 24) + " on…",
+                          gfx::kWidth / 2, 150, gfx::FontSize::Title,
+                          gfx::kText);
+
+    int total = 560 * 2 + 56;
+    int x0 = (gfx::kWidth - total) / 2;
+    for (int i = 0; i < 2; ++i) {
+        bool focused = app.pick_cursor == i;
+        SDL_Rect card = {x0 + i * (560 + 56), 300, 560, 440};
+        app.gfx.fill(card, focused ? gfx::kSurfaceHi : gfx::kSurface);
+
+        SDL_Rect icon = {card.x + 48, card.y + 56, 72, 72};
+        app.gfx.fill(icon, i == 0 ? gfx::kAccent : gfx::kChip);
+        if (i == 1) app.gfx.frame(icon, gfx::kChipEdge, 2);
+        app.gfx.text_centered(i == 0 ? "☁" : "⌂", icon.x + 36, icon.y + 14,
+                              gfx::FontSize::Body,
+                              i == 0 ? gfx::kText : gfx::kTextDim);
+
+        if (i == 0) {
+            app.gfx.text("xCloud", card.x + 48, card.y + 164,
+                         gfx::FontSize::Body, gfx::kText);
+            app.gfx.text("Play in the cloud.", card.x + 48, card.y + 224,
+                         gfx::FontSize::Note, gfx::kTextDim);
+            app.gfx.text("No console needed.", card.x + 48, card.y + 264,
+                         gfx::FontSize::Note, gfx::kTextDim);
+            app.gfx.fill({card.x + 48, card.y + 352, 12, 12}, gfx::kFocus);
+            app.gfx.text(std::string("Ready · ") +
+                             kQualityLabels[app.settings.quality],
+                         card.x + 72, card.y + 342, gfx::FontSize::Small,
+                         gfx::kTextDim);
+        } else {
+            const HomeConsole& console = selected_console(app);
+            app.gfx.text(console_label(app), card.x + 48, card.y + 164,
+                         gfx::FontSize::Body, gfx::kText);
+            app.gfx.text("Remote play from", card.x + 48, card.y + 224,
+                         gfx::FontSize::Note, gfx::kTextDim);
+            app.gfx.text(console.console_type, card.x + 48, card.y + 264,
+                         gfx::FontSize::Note, gfx::kTextDim);
+            bool on = console.power_state == "On";
+            app.gfx.fill({card.x + 48, card.y + 352, 12, 12},
+                         on ? gfx::kFocus : gfx::kWarn);
+            app.gfx.text(console.power_state + " · local network",
+                         card.x + 72, card.y + 342, gfx::FontSize::Small,
+                         gfx::kTextDim);
+        }
+        if (focused) draw_focus_frames(app, card);
+    }
+
+    app.gfx.text_centered(
+        "Hold A on either option to make it the default and skip this screen",
+        gfx::kWidth / 2, 880, gfx::FontSize::Small, gfx::kFaint);
+    draw_hints(app, {{"A", "Play", true}, {"B", "Back"}});
 }
 
 void draw_settings(App& app) {
@@ -920,15 +1160,20 @@ void draw_settings(App& app) {
         const char* title;
         std::string value;
     };
-    Row rows[5] = {
+    std::vector<Row> rows = {
         {"Stream quality", kQualityLabels[app.settings.quality]},
         {"Button layout", kMappingLabels[app.settings.mapping]},
         {"Vibration", kVibrationLabels[app.settings.vibration]},
         {"Region bypass", kRegionLabels[app.settings.region]},
         {"Game language", kLanguageLabels[app.settings.language]},
     };
-    for (int i = 0; i < 5; ++i) {
-        SDL_Rect row = {120, 170 + i * 114, gfx::kWidth - 240, 96};
+    if (!app.consoles.empty())
+        rows.push_back({"Preferred source",
+                        app.settings.source == 2   ? console_label(app)
+                        : app.settings.source == 1 ? "xCloud"
+                                                   : "Ask every time"});
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+        SDL_Rect row = {120, 170 + i * 108, gfx::kWidth - 240, 96};
         bool focused = i == app.settings_cursor;
         // Row-focus variant (card 1g): wide elements don't scale — surface
         // lift + 10px side bar + 4px border + one glow frame instead.
@@ -963,6 +1208,10 @@ void draw_settings(App& app) {
     const char* line1;
     const char* line2;
     switch (app.settings_cursor) {
+        case 5:
+            line1 = "Where Play launches games: xCloud (cloud servers) or";
+            line2 = "remote play from your own console over your network.";
+            break;
         case 1:
             line1 = "Positional keeps the Switch layout under your thumbs;";
             line2 = "match labels follows the printed A/B/X/Y letters.";
@@ -994,6 +1243,10 @@ void draw_settings(App& app) {
     app.gfx.text(line2, note.x + 64, note.y + 60, gfx::FontSize::Note,
                  gfx::kTextDim);
 
+    if (!app.last_exit_step.empty())
+        app.gfx.text("debug · last exit reached: " + app.last_exit_step,
+                     kMargin, kFooterY - 36, gfx::FontSize::Small,
+                     gfx::kFaint);
     draw_hints(app, {{"◀ ▶", "Change"}, {"B", "Back"}});
 }
 
@@ -1213,9 +1466,20 @@ void draw_stream(App& app, SDL_Joystick* joystick) {
               32;
     }
 
-    // Quality chip, top right.
+    // In-stream controls, taught here because once deko3d owns the display
+    // no overlay can be drawn on Switch — this screen is the last chance.
+    app.gfx.text_centered(
+        "In the stream:  hold  −  and  +  together to leave   ·   "
+        "press  L3 + R3  together for the Xbox guide menu",
+        gfx::kWidth / 2, 920, gfx::FontSize::Small, gfx::kTextDim);
+
+    // Source/quality chip, top right.
     std::string quality =
-        std::string("xCloud · ") + kQualityLabels[app.settings.quality];
+        app.launching_home
+            ? (app.consoles.empty() || app.consoles[0].name.empty()
+                   ? std::string("Your Xbox")
+                   : app.consoles[0].name)
+            : std::string("xCloud · ") + kQualityLabels[app.settings.quality];
     int qw = app.gfx.text_width(quality, gfx::FontSize::Small) + 40;
     app.gfx.fill({gfx::kWidth - kMargin - qw, 48, qw, 44},
                  {gfx::kSurface.r, gfx::kSurface.g, gfx::kSurface.b, 217});
@@ -1356,6 +1620,15 @@ int main(int argc, char** argv) {
     app.settings = load_settings();
     app.favorites = load_id_list("favorites.json");
     app.history = load_id_list("history.json");
+    {
+        // Surface the previous run's last exit breadcrumb in Settings, so the
+        // black-screen-on-exit bug can be diagnosed without pulling the SD.
+        std::ifstream in(data_path("exit-log.txt"));
+        std::string line;
+        while (std::getline(in, line))
+            if (!line.empty()) app.last_exit_step = line;
+    }
+    std::remove(data_path("exit-log.txt").c_str());
     apply_region(app.settings);  // before any network: gate opens on first call
 #if defined(__SWITCH__) && defined(GNX_NATIVE_STREAM)
     app.rumble.init();  // HID is up (joystick opened) -> get vibration handles
@@ -1414,6 +1687,10 @@ int main(int argc, char** argv) {
             case Scene::LoadingLibrary:
                 if (app.load_state == 1) {
                     join_worker(app);
+                    // Preferred source = your Xbox: land on the Consoles tab
+                    // (games stay one L-press away).
+                    if (app.settings.source == 2 && !app.consoles.empty())
+                        app.tab = LibraryTab::Consoles;
                     apply_filter(app);
                     app.scene = Scene::Library;
                     try {
@@ -1427,31 +1704,55 @@ int main(int argc, char** argv) {
                 break;
 
             case Scene::Library: {
-                int step = 0;
-                if (input.right) step = 1;
-                if (input.left) step = -1;
-                if (input.down) step = kColumns;
-                if (input.up) step = -kColumns;
-                if (step != 0 && !app.visible.empty()) {
-                    app.cursor = std::clamp(
-                        app.cursor + step, 0,
-                        static_cast<int>(app.visible.size()) - 1);
-                }
+                int tabs = app.consoles.empty() ? 3 : kTabCount;
+                bool console_tab = app.tab == LibraryTab::Consoles;
+
                 if (input.l || input.r) {  // switch tab
                     int t = (static_cast<int>(app.tab) + (input.r ? 1 : -1) +
-                             kTabCount) % kTabCount;
+                             tabs) % tabs;
                     app.tab = static_cast<LibraryTab>(t);
                     app.cursor = 0;
                     apply_filter(app);
+                    break;
                 }
-                if (input.x && !app.visible.empty()) {  // toggle favorite
-                    toggle_favorite(
-                        app, app.games[app.visible[app.cursor]].title_id);
-                    apply_filter(app);  // Favorites tab updates live
-                }
-                if (input.y) {
-                    app.query = keyboard_input(app.query);
-                    apply_filter(app);
+
+                if (console_tab) {
+                    int last = static_cast<int>(app.consoles.size()) - 1;
+                    if (input.left)
+                        app.console_cursor =
+                            std::max(0, app.console_cursor - 1);
+                    if (input.right)
+                        app.console_cursor =
+                            std::min(last, app.console_cursor + 1);
+                    if (input.a && last >= 0) {
+                        const HomeConsole& console = selected_console(app);
+                        app.launch_game = Game{};
+                        app.launch_game.title_id = console.server_id;
+                        app.launch_game.name = console.name.empty()
+                                                   ? "Your Xbox"
+                                                   : console.name;
+                        launch_stream(app, true);
+                    }
+                } else {
+                    int step = 0;
+                    if (input.right) step = 1;
+                    if (input.left) step = -1;
+                    if (input.down) step = kColumns;
+                    if (input.up) step = -kColumns;
+                    if (step != 0 && !app.visible.empty()) {
+                        app.cursor = std::clamp(
+                            app.cursor + step, 0,
+                            static_cast<int>(app.visible.size()) - 1);
+                    }
+                    if (input.x && !app.visible.empty()) {  // toggle favorite
+                        toggle_favorite(
+                            app, app.games[app.visible[app.cursor]].title_id);
+                        apply_filter(app);  // Favorites tab updates live
+                    }
+                    if (input.y) {
+                        app.query = keyboard_input(app.query);
+                        apply_filter(app);
+                    }
                 }
                 if (input.zr) {  // refresh library from Xbox
                     app.scene = Scene::LoadingLibrary;
@@ -1481,8 +1782,11 @@ int main(int argc, char** argv) {
             }
 
             case Scene::Detail: {
-                if (input.up) app.detail_cursor = 0;
-                if (input.down) app.detail_cursor = 1;
+                int last = app.consoles.empty() ? 1 : 2;
+                if (input.up)
+                    app.detail_cursor = std::max(0, app.detail_cursor - 1);
+                if (input.down)
+                    app.detail_cursor = std::min(last, app.detail_cursor + 1);
                 if (input.b) app.scene = Scene::Library;
                 if (input.a && app.detail_index >= 0 &&
                     app.detail_index < static_cast<int>(app.games.size())) {
@@ -1490,27 +1794,60 @@ int main(int argc, char** argv) {
                     if (app.detail_cursor == 1) {
                         toggle_favorite(app, game.title_id);
                         apply_filter(app);
+                    } else if (app.detail_cursor == 2) {
+                        // Cycle the preferred source: Ask -> xCloud -> Xbox.
+                        app.settings.source = (app.settings.source + 1) % 3;
+                        save_settings(app.settings);
                     } else {
                         app.launch_game = game;
                         push_history(app, app.launch_game.title_id);
-#ifdef GNX_NATIVE_STREAM
-                        app.engine->start(
-                            app.launch_game.title_id,
-                            static_cast<QualityTier>(app.settings.quality),
-                            kLanguageCodes[app.settings.language]);
-                        app.stream_hint_until = SDL_GetTicks() + 8000;
-                        app.scene = Scene::Stream;
-#endif
+                        if (!app.consoles.empty() &&
+                            app.settings.source == 0) {
+                            app.pick_cursor = 0;
+                            app.pick_pending = false;
+                            app.scene = Scene::SourcePicker;
+                        } else {
+                            launch_stream(app, app.settings.source == 2);
+                        }
+                    }
+                }
+                break;
+            }
+
+            case Scene::SourcePicker: {
+                if (input.left) app.pick_cursor = 0;
+                if (input.right) app.pick_cursor = 1;
+                if (input.b && !app.pick_pending) app.scene = Scene::Detail;
+                if (input.a && !app.pick_pending) {
+                    app.pick_pending = true;
+                    app.pick_a_since = SDL_GetTicks();
+                }
+                if (app.pick_pending) {
+                    // Tap = play once; hold >= 800 ms = fix as the default
+                    // (settings.json) and skip this screen from now on.
+                    bool held =
+                        joystick && SDL_JoystickGetButton(joystick, kBtnA);
+                    if (held &&
+                        SDL_GetTicks() - app.pick_a_since >= 800) {
+                        app.settings.source = app.pick_cursor == 1 ? 2 : 1;
+                        save_settings(app.settings);
+                        app.pick_pending = false;
+                        launch_stream(app, app.pick_cursor == 1);
+                    } else if (!held) {
+                        app.pick_pending = false;
+                        launch_stream(app, app.pick_cursor == 1);
                     }
                 }
                 break;
             }
 
             case Scene::Settings: {
+                int last_row = app.consoles.empty() ? 4 : 5;
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
-                    app.settings_cursor = std::min(4, app.settings_cursor + 1);
+                    app.settings_cursor =
+                        std::min(last_row, app.settings_cursor + 1);
                 int direction = (input.right ? 1 : 0) - (input.left ? 1 : 0);
                 if (direction != 0) {
                     if (app.settings_cursor == 0)
@@ -1528,10 +1865,13 @@ int main(int argc, char** argv) {
                         app.settings.region =
                             (app.settings.region + direction + 6) % 6;
                         apply_region(app.settings);  // takes effect next request
-                    } else
+                    } else if (app.settings_cursor == 4)
                         app.settings.language =
                             (app.settings.language + direction + kLanguageCount) %
                             kLanguageCount;
+                    else
+                        app.settings.source =
+                            (app.settings.source + direction + 3) % 3;
                     save_settings(app.settings);
                 }
                 if (input.b || input.zl) app.scene = app.settings_return;
@@ -1559,13 +1899,8 @@ int main(int argc, char** argv) {
                         app.engine->stop();
                         app.scene = Scene::Library;
                     }
-                    if (input.a) {  // retry
-                        app.engine->start(
-                            app.launch_game.title_id,
-                            static_cast<QualityTier>(app.settings.quality),
-                            kLanguageCodes[app.settings.language]);
-                        app.stream_hint_until = SDL_GetTicks() + 8000;
-                    }
+                    if (input.a)  // retry the same target
+                        launch_stream(app, app.launching_home);
                 } else if (input.b) {  // cancel while connecting
                     app.engine->stop();
                     app.scene = Scene::Library;
@@ -1652,6 +1987,7 @@ int main(int argc, char** argv) {
             case Scene::LoadingLibrary: draw_loading(app); break;
             case Scene::Library: draw_library(app); break;
             case Scene::Detail: draw_detail(app); break;
+            case Scene::SourcePicker: draw_source_picker(app); break;
             case Scene::Settings: draw_settings(app); break;
             case Scene::Stream:
 #ifdef GNX_NATIVE_STREAM
