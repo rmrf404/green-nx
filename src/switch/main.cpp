@@ -181,6 +181,7 @@ struct App {
     Settings settings;
     int settings_cursor = 0;
     Scene settings_return = Scene::Library;  // scene to go back to from Settings
+    bool signout_armed = false;  // Settings sign-out row: first A arms, second confirms
     int detail_index = -1;   // games[] index shown in Scene::Detail
     int detail_cursor = 0;   // 0 = Play, 1 = favorite, 2 = Play on... (if any)
     std::vector<HomeConsole> consoles;  // linked Xboxes; empty = hide feature
@@ -953,7 +954,6 @@ void draw_library(App& app) {
                          {"L R", "Tabs"},
                          {"ZR", "Refresh"},
                          {"ZL", "Settings"},
-                         {"−", "Sign out"},
                          {"+", "Exit"}});
         return;
     }
@@ -1012,7 +1012,6 @@ void draw_library(App& app) {
                      {"Y", "Search"},
                      {"ZR", "Refresh"},
                      {"ZL", "Settings"},
-                     {"−", "Sign out"},
                      {"+", "Exit"}});
 }
 
@@ -1172,8 +1171,17 @@ void draw_settings(App& app) {
                         app.settings.source == 2   ? console_label(app)
                         : app.settings.source == 1 ? "xCloud"
                                                    : "Ask every time"});
+    // Sign out lives here rather than on a library shoulder button so a stray
+    // press can never log the account out; it also takes a second A to confirm.
+    int signout_row = static_cast<int>(rows.size());
+    rows.push_back({"Sign out", app.signout_armed
+                                    ? "Press A again to confirm"
+                                    : app.gamertag});
+    // 7 rows (console linked + sign out) must still clear the note box at
+    // y=820, so the row pitch tightens once the list grows past 6.
+    int pitch = rows.size() <= 6 ? 108 : 92;
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
-        SDL_Rect row = {120, 170 + i * 108, gfx::kWidth - 240, 96};
+        SDL_Rect row = {120, 170 + i * pitch, gfx::kWidth - 240, 96};
         bool focused = i == app.settings_cursor;
         // Row-focus variant (card 1g): wide elements don't scale — surface
         // lift + 10px side bar + 4px border + one glow frame instead.
@@ -1188,7 +1196,14 @@ void draw_settings(App& app) {
         app.gfx.text(rows[i].title, row.x + 68, row.y + 26,
                      gfx::FontSize::Body, gfx::kText);
         int vw = app.gfx.text_width(rows[i].value, gfx::FontSize::Body);
-        if (focused) {
+        if (i == signout_row) {
+            // Action row: no ‹ › carets, and the armed state reads as danger.
+            app.gfx.text(rows[i].value, row.x + row.w - 44 - vw, row.y + 26,
+                         gfx::FontSize::Body,
+                         app.signout_armed ? gfx::kError
+                         : focused         ? gfx::kText
+                                           : gfx::kTextDim);
+        } else if (focused) {
             int vx = row.x + row.w - 44 - vw;
             app.gfx.text("‹", vx - 56, row.y + 26, gfx::FontSize::Body,
                          gfx::kTextDim);
@@ -1207,7 +1222,10 @@ void draw_settings(App& app) {
     // while Region bypass is active.
     const char* line1;
     const char* line2;
-    switch (app.settings_cursor) {
+    if (app.settings_cursor == signout_row) {
+        line1 = "Signs this Switch out of your Microsoft account and clears";
+        line2 = "the saved sign-in. Cloud saves and games are not affected.";
+    } else switch (app.settings_cursor) {
         case 5:
             line1 = "Where Play launches games: xCloud (cloud servers) or";
             line2 = "remote play from your own console over your network.";
@@ -1237,7 +1255,10 @@ void draw_settings(App& app) {
     app.gfx.fill(note, gfx::kBar);
     app.gfx.frame(note, gfx::kChip, 2);
     app.gfx.fill({note.x + 28, note.y + 28, 8, 64},
-                 app.settings.region != 0 ? gfx::kWarn : gfx::kAccent);
+                 app.signout_armed && app.settings_cursor == signout_row
+                     ? gfx::kError
+                 : app.settings.region != 0 ? gfx::kWarn
+                                            : gfx::kAccent);
     app.gfx.text(line1, note.x + 64, note.y + 20, gfx::FontSize::Note,
                  gfx::kTextDim);
     app.gfx.text(line2, note.x + 64, note.y + 60, gfx::FontSize::Note,
@@ -1247,7 +1268,12 @@ void draw_settings(App& app) {
         app.gfx.text("debug · last exit reached: " + app.last_exit_step,
                      kMargin, kFooterY - 36, gfx::FontSize::Small,
                      gfx::kFaint);
-    draw_hints(app, {{"◀ ▶", "Change"}, {"B", "Back"}});
+    if (app.settings_cursor == signout_row)
+        draw_hints(app, {{"A", app.signout_armed ? "Confirm sign out"
+                                                 : "Sign out", true},
+                         {"B", "Back"}});
+    else
+        draw_hints(app, {{"◀ ▶", "Change"}, {"B", "Back"}});
 }
 
 #ifdef GNX_NATIVE_STREAM
@@ -1758,14 +1784,6 @@ int main(int argc, char** argv) {
                     app.scene = Scene::LoadingLibrary;
                     start_library_load(app, true);
                 }
-                if (input.minus) {
-                    app.auth->logout();
-                    std::remove(data_path("games.json").c_str());
-                    app.games.clear();
-                    app.visible.clear();
-                    app.scene = Scene::SignIn;
-                    start_signin(app);
-                }
                 if (input.zl) {
                     app.settings_return = Scene::Library;
                     app.scene = Scene::Settings;
@@ -1842,14 +1860,32 @@ int main(int argc, char** argv) {
             }
 
             case Scene::Settings: {
-                int last_row = app.consoles.empty() ? 4 : 5;
+                int signout_row = app.consoles.empty() ? 5 : 6;
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
                     app.settings_cursor =
-                        std::min(last_row, app.settings_cursor + 1);
+                        std::min(signout_row, app.settings_cursor + 1);
+                // Leaving the row (or the screen, below) always disarms.
+                if (input.up || input.down) app.signout_armed = false;
+                if (input.a && app.settings_cursor == signout_row) {
+                    if (!app.signout_armed) {
+                        app.signout_armed = true;
+                    } else {
+                        app.signout_armed = false;
+                        app.auth->logout();
+                        std::remove(data_path("games.json").c_str());
+                        std::remove(data_path("consoles.json").c_str());
+                        app.games.clear();
+                        app.visible.clear();
+                        app.consoles.clear();
+                        app.scene = Scene::SignIn;
+                        start_signin(app);
+                        break;
+                    }
+                }
                 int direction = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-                if (direction != 0) {
+                if (direction != 0 && app.settings_cursor != signout_row) {
                     if (app.settings_cursor == 0)
                         app.settings.quality =
                             (app.settings.quality + direction + 3) % 3;
@@ -1874,7 +1910,10 @@ int main(int argc, char** argv) {
                             (app.settings.source + direction + 3) % 3;
                     save_settings(app.settings);
                 }
-                if (input.b || input.zl) app.scene = app.settings_return;
+                if (input.b || input.zl) {
+                    app.signout_armed = false;
+                    app.scene = app.settings_return;
+                }
                 break;
             }
 

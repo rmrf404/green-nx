@@ -2,7 +2,7 @@
 
 A standalone, open-source **Xbox Cloud Gaming (xCloud) client for the Nintendo
 Switch** (homebrew). Sign in with your Microsoft account and stream your Game
-Pass Ultimate library natively — WebRTC connection, hardware H.264 decoding and
+Pass library natively — WebRTC connection, hardware H.264 decoding and
 GPU rendering are all done on the console, with no companion apps or PCs
 involved.
 
@@ -24,7 +24,9 @@ involved.
 ## Requirements
 
 - A Nintendo Switch running the [Atmosphère](https://github.com/Atmosphere-NX/Atmosphere) custom firmware
-- An active **Xbox Game Pass Ultimate** subscription
+- An active **Xbox Game Pass** subscription — every tier (Essential, Premium,
+  Ultimate) includes Cloud Gaming; Ultimate streams the largest catalog at the
+  highest quality
 - A 5 GHz Wi-Fi connection is recommended
 
 ## Install
@@ -98,7 +100,7 @@ green-nx is a **fun, experimental, non-commercial** hobby project, provided
 as-is for personal use. It is **not affiliated with, endorsed by, or supported
 by Microsoft or Nintendo** in any way. Xbox, Xbox Cloud Gaming and Game Pass
 are trademarks of Microsoft. Nintendo Switch is a trademark of Nintendo. You
-need your own valid Game Pass Ultimate subscription; this project only
+need your own valid Game Pass subscription; this project only
 implements a client for a service you already pay for.
 
 ## License
