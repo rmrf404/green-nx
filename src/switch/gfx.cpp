@@ -12,7 +12,7 @@
 namespace gnx::gfx {
 
 namespace {
-constexpr int kFontPx[5] = {26, 34, 52, 96, 40};
+constexpr int kFontPx[5] = {24, 38, 54, 100, 30};
 }
 
 bool Gfx::init() {
@@ -183,10 +183,11 @@ void Gfx::draw_texture(SDL_Texture* texture, const SDL_Rect& destination) {
 }
 
 void Gfx::spinner(int cx, int y, Uint32 ticks) {
+    // 3 pulsing 14x14 squares, 30px apart (redesign card 1c).
     for (int i = 0; i < 3; ++i) {
         float phase = std::sin((ticks / 200.0f) - i * 0.9f);
-        Uint8 alpha = static_cast<Uint8>(120 + 110 * (phase > 0 ? phase : 0));
-        SDL_Rect dot = {cx - 40 + i * 40, y, 16, 16};
+        Uint8 alpha = static_cast<Uint8>(64 + 191 * (phase > 0 ? phase : 0));
+        SDL_Rect dot = {cx - 37 + i * 30, y, 14, 14};
         fill(dot, {kText.r, kText.g, kText.b, alpha});
     }
 }

@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html>
+<head>
+
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<meta name="design_doc_mode" content="canvas">
+<link href="https://fonts.googleapis.com/css2?family=M+PLUS+1p:wght@400;500;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#1b1d22;font-family:'M PLUS 1p',system-ui,sans-serif}
+a{color:#7fd67f;text-decoration:none}a:hover{color:#a5e8a5}
+.dv-turn{padding:40px 44px 60px;scroll-margin-top:16px}
+.dv-thd{display:flex;align-items:baseline;gap:10px;margin:0 0 24px}
+.dv-tid{font:600 11px 'JetBrains Mono',monospace;padding:3px 8px;background:#107C10;color:#fff;text-decoration:none}
+.dv-tname{font:600 14px/1.2 'M PLUS 1p',sans-serif;color:#e8eaee}
+.dv-opts{display:flex;flex-wrap:wrap;gap:48px;align-items:flex-start}
+.dv-opt{flex:none;display:flex;flex-direction:column;gap:10px;scroll-margin-top:16px}
+.dv-oid{font:600 11px 'JetBrains Mono',monospace;padding:3px 8px;background:rgba(255,255,255,.12);color:#e8eaee;text-decoration:none}
+.dv-olabel{display:flex;align-items:baseline;gap:10px;font:400 12px/1.3 'M PLUS 1p',sans-serif;color:rgba(255,255,255,.55)}
+.dv-card{max-width:100%;background:#0A0D12;border:1px solid rgba(255,255,255,.1);overflow:hidden}
+.dv-opt:target .dv-oid{background:#107C10;color:#fff}
+.dv-note{width:1920px;box-sizing:border-box;background:#101319;border:1px solid rgba(255,255,255,.08);border-top:none;padding:14px 20px;font:400 12.5px/1.7 'JetBrains Mono',monospace;color:#8a93a3}
+.dv-note b{color:#c9d2df;font-weight:600}
+</style>
+</helmet>
+
+<section class="dv-turn" id="t1">
+<div class="dv-thd"><a class="dv-tid" href="#t1">1</a><span class="dv-tname">Rediseño green-nx — dirección "OLED premium" · lienzo 1920×1080 · solo primitivas SDL2 (rect relleno / marco / texto / textura)</span></div>
+<div class="dv-opts">
+
+<!-- ============ 1a SPEC ============ -->
+<div class="dv-opt" id="1a"><div class="dv-olabel"><a class="dv-oid" href="#1a">1a</a>Spec de diseño — paleta · tipografía · espaciado · sistema de foco</div>
+<div class="dv-card" style="width:1920px;box-sizing:border-box;padding:60px;display:flex;flex-direction:column;gap:48px;color:#F0F3F8" data-screen-label="Spec">
+<div style="display:flex;gap:60px">
+<div style="flex:1">
+<div style="font-size:26px;font-weight:800;color:#2FBF2F;margin-bottom:20px">PALETA</div>
+<div style="display:flex;flex-direction:column;gap:10px;font-size:16px">
+<div style="display:flex;align-items:center;gap:14px"><span style="width:56px;height:36px;background:#0A0D12;border:1px solid #333"></span><b style="width:150px;font-family:'JetBrains Mono',monospace">#0A0D12</b><span style="color:#98A2B3">kBg — fondo global (OLED, casi negro)</span></div>
+<div style="display:flex;align-items:center;gap:14px"><span style="width:56px;height:36px;background:#0E1118;border:1px solid #333"></span><b style="width:150px;font-family:'JetBrains Mono',monospace">#0E1118</b><span style="color:#98A2B3">kBar — footer / bandas de cabecera</span></div>
+<div style="display:flex;align-items:center;gap:14px"><span style="width:56px;height:36px;background:#161B24"></span><b style="width:150px;font-family:'JetBrains Mono',monospace">#161B24</b><span style="color:#98A2B3">kSurface — tarjetas, filas, placas de nombre</span></div>
+<div style="display:flex;align-items:center;gap:14px"><span style="width:56px;height:36px;background:#212836"></span><b style="width:150px;font-family:'JetBrains Mono',monospace">#212836</b><span style="color:#98A2B3">kSurfaceHi — superficie enfocada / chips</span></div>
+<div style="display:flex;align-items:center;gap:14px"><span style="width:56px;height:36px;background:#107C10"></span><b style="width:150px;font-family:'JetBrains Mono',monospace">#107C10</b><span style="color:#98A2B3">kAccent — marca, tabs activas, valores</span></div>
+<div style="display:flex;align-items:center;gap:14px"><span style="width:56px;height:36px;background:#2FBF2F"></span><b style="width:150px;font-family:'JetBrains Mono',monospace">#2FBF2F</b><span style="color:#98A2B3">kFocus — SOLO para el sistema de foco (borde+glow)</span></div>
+<div style="display:flex;align-items:center;gap:14px"><span style="width:56px;height:36px;background:#F0F3F8"></span><b style="width:150px;font-family:'JetBrains Mono',monospace">#F0F3F8</b><span style="color:#98A2B3">kText — texto primario</span></div>
+<div style="display:flex;align-items:center;gap:14px"><span style="width:56px;height:36px;background:#98A2B3"></span><b style="width:150px;font-family:'JetBrains Mono',monospace">#98A2B3</b><span style="color:#98A2B3">kTextDim — texto secundario, hints</span></div>
+<div style="display:flex;align-items:center;gap:14px"><span style="width:56px;height:36px;background:#F0B43C"></span><b style="width:150px;font-family:'JetBrains Mono',monospace">#F0B43C</b><span style="color:#98A2B3">kWarn — favoritos, avisos</span></div>
+<div style="display:flex;align-items:center;gap:14px"><span style="width:56px;height:36px;background:#E86868"></span><b style="width:150px;font-family:'JetBrains Mono',monospace">#E86868</b><span style="color:#98A2B3">kError — errores</span></div>
+</div>
+</div>
+<div style="flex:1">
+<div style="font-size:26px;font-weight:800;color:#2FBF2F;margin-bottom:20px">TIPOGRAFÍA — fuente estándar de Switch · 5 tamaños</div>
+<div style="display:flex;flex-direction:column;gap:14px">
+<div style="display:flex;align-items:baseline;gap:20px"><b style="width:110px;font-family:'JetBrains Mono',monospace;color:#98A2B3">XS · 24px</b><span style="font-size:24px">Hints de botones, captions, rutas de log</span></div>
+<div style="display:flex;align-items:baseline;gap:20px"><b style="width:110px;font-family:'JetBrains Mono',monospace;color:#98A2B3">S · 30px</b><span style="font-size:30px">Metadatos, notas, estados secundarios</span></div>
+<div style="display:flex;align-items:baseline;gap:20px"><b style="width:110px;font-family:'JetBrains Mono',monospace;color:#98A2B3">M · 38px</b><span style="font-size:38px">Cuerpo: tabs, filas de ajustes, mensajes</span></div>
+<div style="display:flex;align-items:baseline;gap:20px"><b style="width:110px;font-family:'JetBrains Mono',monospace;color:#98A2B3">L · 54px</b><span style="font-size:54px;font-weight:700">Títulos de pantalla y de juego</span></div>
+<div style="display:flex;align-items:baseline;gap:20px"><b style="width:110px;font-family:'JetBrains Mono',monospace;color:#98A2B3">XL · 100px</b><span style="font-size:100px;font-weight:800;line-height:1">Código · logo</span></div>
+</div>
+<div style="font-size:26px;font-weight:800;color:#2FBF2F;margin:36px 0 16px">ESPACIADO</div>
+<div style="font-size:20px;color:#98A2B3;line-height:1.9">Margen de seguridad: <b style="color:#F0F3F8">60px</b> en los 4 bordes (overscan TV) · Unidad base: <b style="color:#F0F3F8">8px</b> · Footer de hints: <b style="color:#F0F3F8">84px</b> de alto, borde superior 2px #1C2230 · Cabecera de biblioteca: filas a y=48 y y=124 · Parrilla: 6 col × 230×345px, gap-x 40, gap-y 72, origen x=170 y=220</div>
+</div>
+</div>
+<div style="display:flex;gap:60px;align-items:flex-start">
+<div>
+<div style="font-size:26px;font-weight:800;color:#2FBF2F;margin-bottom:20px">SISTEMA DE FOCO — visible a 3 m</div>
+<div style="display:flex;gap:48px;align-items:center">
+<div style="padding:40px">
+<div style="width:248px;height:372px;background:#233047;border:6px solid #2FBF2F;box-shadow:0 0 0 6px rgba(47,191,47,.4),0 0 0 14px rgba(47,191,47,.15);position:relative">
+<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">SD</div>
+</div>
+<div style="width:284px;margin:14px 0 0 -18px;background:#161B24;padding:10px 0;text-align:center;font-size:24px;font-weight:700">Starfall Drift</div>
+</div>
+<div style="font-size:20px;color:#98A2B3;line-height:2;max-width:640px">
+<b style="color:#F0F3F8">4 capas, todas con rects:</b><br>
+1 · <b style="color:#F0F3F8">Escala 1.08×</b>: la textura se dibuja 230×345 → 248×372, centrada (−9px x, −13px y).<br>
+2 · <b style="color:#F0F3F8">Borde</b>: frame() 6px, color kFocus #2FBF2F.<br>
+3 · <b style="color:#F0F3F8">Glow simulado</b>: 2 frames concéntricos — 6px a offset +6 con alpha 102 (40%), 8px a offset +14 con alpha 38 (15%). Alpha simple sobre fondo.<br>
+4 · <b style="color:#F0F3F8">Placa de nombre</b>: fill kSurface bajo la tarjeta (ancho tarjeta+36, alto 44), texto XS 24px bold centrado. Solo en el elemento enfocado.<br>
+<span style="color:#6b7484">Transición: el borde+glow interpolan alpha 0→100% en 120 ms (2 valores de alpha por frame, coste cero).</span>
+</div>
+</div>
+</div>
+<div>
+<div style="font-size:26px;font-weight:800;color:#2FBF2F;margin-bottom:20px">CHIPS DE BOTONES (footer)</div>
+<div style="display:flex;align-items:center;gap:36px;background:#0E1118;border-top:2px solid #1C2230;padding:22px 40px">
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#107C10;color:#fff;font-weight:800;font-size:24px;display:inline-flex;align-items:center;justify-content:center">A</span><span style="font-size:24px;color:#F0F3F8">Play</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">B</span><span style="font-size:24px;color:#98A2B3">Back</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="min-width:40px;height:40px;padding:0 8px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">ZL</span><span style="font-size:24px;color:#98A2B3">Settings</span></span>
+</div>
+<div style="font-size:20px;color:#98A2B3;line-height:2;margin-top:16px;max-width:560px">Chip = fill 40×40 kSurfaceHi + frame 2px #2A3242 + letra XS bold centrada. La acción primaria de la pantalla usa fill kAccent y label kText. Separación entre hints: 36px. Alineados a la derecha, a 60px del borde.</div>
+</div>
+</div>
+</div></div>
+
+<!-- ============ 1b SPLASH ============ -->
+<div class="dv-opt" id="1b"><div class="dv-olabel"><a class="dv-oid" href="#1b">1b</a>Splash — animación de arranque (~1,2 s), fotograma final</div>
+<div class="dv-card" style="width:1920px;height:1080px;position:relative;overflow:hidden;color:#F0F3F8;font-family:'M PLUS 1p',sans-serif" data-screen-label="Splash">
+<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0">
+<div style="display:flex;align-items:center;gap:36px">
+<div style="width:120px;height:120px;background:#107C10;display:flex;align-items:center;justify-content:center;font-size:54px;font-weight:800;color:#fff">nx</div>
+<div style="font-size:100px;font-weight:800;letter-spacing:-2px">green-nx</div>
+</div>
+<div style="font-size:30px;color:#98A2B3;margin-top:28px">Xbox Cloud Gaming for Nintendo Switch</div>
+<div style="width:360px;height:6px;background:#1C2230;margin-top:64px;position:relative"><div style="position:absolute;left:0;top:0;height:6px;width:238px;background:#2FBF2F"></div></div>
+</div>
+</div>
+<div class="dv-note"><b>Animación (3 fases, todo rects/alpha):</b> 0–300ms el cuadrado verde crece de 0×120 a 120×120 (anchura del fill por frame) · 300–600ms wordmark+subtítulo fade-in (alpha 0→255) · 600ms+ la barra de progreso (fill kBar 360×6 + fill kFocus de anchura = progreso real de arranque). Sin spinner: la barra ES el indicador. Primitivas: 2 fill, 1 fill animado, 3 text.</div></div>
+
+<!-- ============ 1c SIGN-IN ============ -->
+<div class="dv-opt" id="1c"><div class="dv-olabel"><a class="dv-oid" href="#1c">1c</a>Sign-in — el código es el protagonista, legible a 3 m</div>
+<div class="dv-card" style="width:1920px;height:1080px;position:relative;overflow:hidden;color:#F0F3F8;font-family:'M PLUS 1p',sans-serif" data-screen-label="Sign-in">
+<div style="position:absolute;left:60px;top:48px;display:flex;align-items:center;gap:20px">
+<div style="width:44px;height:44px;background:#107C10;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;color:#fff">nx</div>
+<div style="font-size:30px;font-weight:700">green-nx</div>
+</div>
+<div style="position:absolute;left:0;right:0;top:170px;display:flex;flex-direction:column;align-items:center">
+<div style="font-size:54px;font-weight:700">Sign in with Microsoft</div>
+<div style="display:flex;align-items:center;gap:24px;margin-top:64px">
+<div style="width:44px;height:44px;background:#161B24;border:2px solid #2A3242;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:700;color:#98A2B3;box-sizing:border-box">1</div>
+<div style="font-size:30px;color:#98A2B3">On your phone or computer, open</div>
+<div style="background:#161B24;padding:10px 28px;font-size:38px;font-weight:700;color:#2FBF2F">microsoft.com/link</div>
+</div>
+<div style="display:flex;align-items:center;gap:24px;margin-top:36px">
+<div style="width:44px;height:44px;background:#161B24;border:2px solid #2A3242;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:700;color:#98A2B3;box-sizing:border-box">2</div>
+<div style="font-size:30px;color:#98A2B3">and enter this code</div>
+</div>
+<div style="margin-top:44px;background:#161B24;border:4px solid #107C10;padding:36px 80px;display:flex;align-items:center;gap:48px">
+<div style="font-size:100px;font-weight:800;letter-spacing:14px;line-height:1">FJK3</div>
+<div style="width:24px;height:8px;background:#2A3242"></div>
+<div style="font-size:100px;font-weight:800;letter-spacing:14px;line-height:1">PZQ7</div>
+</div>
+<div style="display:flex;align-items:center;gap:16px;margin-top:56px">
+<div style="width:14px;height:14px;background:#F0F3F8"></div>
+<div style="width:14px;height:14px;background:rgba(240,243,248,.55)"></div>
+<div style="width:14px;height:14px;background:rgba(240,243,248,.25)"></div>
+<div style="font-size:24px;color:#98A2B3;margin-left:12px">Waiting for you to sign in…</div>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;height:84px;background:#0E1118;border-top:2px solid #1C2230;display:flex;align-items:center;justify-content:flex-end;gap:36px;padding:0 60px;box-sizing:border-box">
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="min-width:40px;height:40px;padding:0 8px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">ZL</span><span style="font-size:24px;color:#98A2B3">Settings · region bypass</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">B</span><span style="font-size:24px;color:#98A2B3">Exit</span></span>
+</div>
+</div>
+<div class="dv-note"><b>Primitivas:</b> pasos = fill 44×44 kSurface + frame 2px + text; URL = fill kSurface + text M en kFocus; código = fill kSurface + frame 4px kAccent + text XL 100px con letter-spacing (dibujar carácter a carácter con avance fijo de 14px extra) + fill 24×8 como separador central; spinner = 3 fills 14×14 con alpha pulsante (ya existe gfx.spinner, reducir a 14px). El grupo 4+4 evita errores de lectura del código.</div></div>
+
+<!-- ============ 1d LOADING ============ -->
+<div class="dv-opt" id="1d"><div class="dv-olabel"><a class="dv-oid" href="#1d">1d</a>Carga de biblioteca — skeleton de la parrilla en lugar de texto suelto</div>
+<div class="dv-card" style="width:1920px;height:1080px;position:relative;overflow:hidden;color:#F0F3F8;font-family:'M PLUS 1p',sans-serif" data-screen-label="Loading library">
+<div style="position:absolute;left:60px;top:48px;display:flex;align-items:center;gap:20px">
+<div style="width:44px;height:44px;background:#107C10;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;color:#fff">nx</div>
+<div style="font-size:30px;font-weight:700">green-nx</div>
+</div>
+<div style="position:absolute;left:170px;top:124px;width:220px;height:38px;background:#161B24"></div>
+<div style="position:absolute;left:170px;top:220px;display:flex;gap:40px">
+<div style="width:230px;height:345px;background:#161B24"></div>
+<div style="width:230px;height:345px;background:#141821"></div>
+<div style="width:230px;height:345px;background:#12151d"></div>
+<div style="width:230px;height:345px;background:#101319"></div>
+<div style="width:230px;height:345px;background:#0E1116"></div>
+<div style="width:230px;height:345px;background:#0D0F14"></div>
+</div>
+<div style="position:absolute;left:0;right:0;top:700px;display:flex;flex-direction:column;align-items:center;gap:24px">
+<div style="display:flex;align-items:center;gap:16px">
+<div style="width:14px;height:14px;background:#F0F3F8"></div>
+<div style="width:14px;height:14px;background:rgba(240,243,248,.55)"></div>
+<div style="width:14px;height:14px;background:rgba(240,243,248,.25)"></div>
+</div>
+<div style="font-size:30px;color:#98A2B3">Loading your library…</div>
+
+</div>
+</div>
+<div class="dv-note"><b>Primitivas:</b> cabecera real (ya cargada) + 1 fila de 6 fills kSurface con brillo decreciente (6 colores fijos, sin gradiente: cada tarjeta un tono más oscuro — simula profundidad de carga) + spinner + text S de estado ("Fetching credentials…" → "Loading your library…" → "Resolving names and covers (142)…"). El skeleton comunica QUÉ está cargando y ancla la transición: al llegar los datos, las tarjetas reales aparecen en el mismo sitio.</div></div>
+
+<!-- ============ 1e LIBRARY ============ -->
+<div class="dv-opt" id="1e"><div class="dv-olabel"><a class="dv-oid" href="#1e">1e</a>Biblioteca — pestaña All, foco en "Starfall Drift" · selector de origen en cabecera</div>
+<div class="dv-card" style="width:1920px;height:1080px;position:relative;overflow:hidden;color:#F0F3F8;font-family:'M PLUS 1p',sans-serif" data-screen-label="Library">
+<div style="position:absolute;left:60px;top:48px;display:flex;align-items:center;gap:20px">
+<div style="width:44px;height:44px;background:#107C10;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;color:#fff">nx</div>
+<div style="font-size:30px;font-weight:700">green-nx</div>
+</div>
+<div style="position:absolute;right:60px;top:48px;display:flex;align-items:center;gap:28px">
+<div style="display:flex;align-items:center;gap:12px;background:#161B24;padding:8px 20px">
+<div style="width:12px;height:12px;background:#2FBF2F"></div>
+<div style="font-size:24px;color:#F0F3F8">xCloud</div>
+<div style="font-size:24px;color:#5b6474">·</div>
+<div style="font-size:24px;color:#98A2B3">1080p HQ</div>
+</div>
+<div style="font-size:24px;color:#98A2B3">SgtNugget</div>
+</div>
+<div style="position:absolute;left:170px;top:124px;display:flex;align-items:center;gap:44px">
+<span style="min-width:36px;height:36px;background:#1C2230;border:2px solid #2A3242;color:#98A2B3;font-weight:700;font-size:22px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">L</span>
+<div style="position:relative;padding-bottom:12px"><span style="font-size:38px;font-weight:700;color:#F0F3F8">All games</span><div style="position:absolute;left:0;right:0;bottom:0;height:5px;background:#107C10"></div></div>
+<span style="font-size:38px;color:#5b6474">Favorites</span>
+<span style="font-size:38px;color:#5b6474">History</span>
+<span style="min-width:36px;height:36px;background:#1C2230;border:2px solid #2A3242;color:#98A2B3;font-weight:700;font-size:22px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">R</span>
+</div>
+<div style="position:absolute;right:170px;top:138px;font-size:24px;color:#5b6474">142 games</div>
+<div style="position:absolute;left:170px;top:220px;display:grid;grid-template-columns:repeat(6,230px);grid-auto-rows:345px;column-gap:40px;row-gap:72px">
+<div style="position:relative;background:#233047;z-index:2;transform:scale(1.08);border:6px solid #2FBF2F;box-shadow:0 0 0 6px rgba(47,191,47,.4),0 0 0 14px rgba(47,191,47,.15);box-sizing:border-box">
+<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">SD</div>
+<div style="position:absolute;left:6px;top:6px;width:44px;height:44px;background:#F0B43C;display:flex;align-items:center;justify-content:center;font-size:26px;color:#0A0D12">★</div>
+<div style="position:absolute;left:-24px;right:-24px;top:359px;background:#161B24;padding:9px 0;text-align:center;font-size:24px;font-weight:700;color:#F0F3F8">Starfall Drift</div>
+</div>
+<div style="position:relative;background:#3A2430"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">NV</div></div>
+<div style="position:relative;background:#1F3A33"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">IH</div><div style="position:absolute;left:8px;top:8px;width:44px;height:44px;background:#F0B43C;display:flex;align-items:center;justify-content:center;font-size:26px;color:#0A0D12">★</div></div>
+<div style="position:relative;background:#3B3220"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">DR</div></div>
+<div style="position:relative;background:#2C2440"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">EM</div></div>
+<div style="position:relative;background:#402620"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">BC</div></div>
+<div style="position:relative;background:#20303F"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">SR</div></div>
+<div style="position:relative;background:#33202C"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">CW</div><div style="position:absolute;left:8px;top:8px;width:44px;height:44px;background:#F0B43C;display:flex;align-items:center;justify-content:center;font-size:26px;color:#0A0D12">★</div></div>
+<div style="position:relative;background:#24313A"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">VP</div></div>
+<div style="position:relative;background:#312A1E"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">DL</div></div>
+<div style="position:relative;background:#1E2C24"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">FG</div></div>
+<div style="position:relative;background:#2E2233"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:84px;font-weight:800;color:rgba(255,255,255,.14)">HT</div></div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;height:84px;background:#0E1118;border-top:2px solid #1C2230;display:flex;align-items:center;justify-content:flex-end;gap:32px;padding:0 60px;box-sizing:border-box;z-index:3">
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#107C10;color:#fff;font-weight:800;font-size:24px;display:inline-flex;align-items:center;justify-content:center">A</span><span style="font-size:24px;color:#F0F3F8">Details</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">X</span><span style="font-size:24px;color:#98A2B3">Favorite</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">Y</span><span style="font-size:24px;color:#98A2B3">Search</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="min-width:40px;height:40px;padding:0 8px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">ZR</span><span style="font-size:24px;color:#98A2B3">Refresh</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="min-width:40px;height:40px;padding:0 8px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">ZL</span><span style="font-size:24px;color:#98A2B3">Settings</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">−</span><span style="font-size:24px;color:#98A2B3">Sign out</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">+</span><span style="font-size:24px;color:#98A2B3">Exit</span></span>
+</div>
+</div>
+<div class="dv-note"><b>Jerarquía resuelta:</b> fila 1 = identidad (logo) e identidad de sesión (origen + calidad + gamertag, agrupados en un chip kSurface); fila 2 = navegación (tabs con chips L/R pegados a ellas — el hint vive donde actúa) + contador degradado a #5b6474. <b>Selector de origen:</b> el chip "▪ xCloud · 1080p HQ" solo se dibuja si hay una consola vinculada (caso mayoritario: ni aparece); es informativo aquí — se cambia en <a class="dv-oid" href="#1k">1k</a> o Ajustes. <b>Parrilla:</b> igual que hoy (6 col) pero 230×345, gap-y 72 para la placa de nombre. Favorito: fill 44×44 kWarn + text "★" (glifo U+2605 presente en la fuente Switch). <b>Primitivas por tarjeta:</b> 1 textura (o fill+text si no cargó) + [fill+text favorito] + foco (ver <a class="dv-oid" href="#1a">1a</a>).</div></div>
+
+<!-- ============ 1f GAME DETAIL ============ -->
+<div class="dv-opt" id="1f"><div class="dv-olabel"><a class="dv-oid" href="#1f">1f</a>Detalle de juego — nueva pantalla: A abre esto, Play enfocado por defecto (un A extra lanza)</div>
+<div class="dv-card" style="width:1920px;height:1080px;position:relative;overflow:hidden;color:#F0F3F8;font-family:'M PLUS 1p',sans-serif" data-screen-label="Game detail">
+<div style="position:absolute;left:170px;top:120px;width:520px;height:780px;background:#233047">
+<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:160px;font-weight:800;color:rgba(255,255,255,.14)">SD</div>
+<div style="position:absolute;left:12px;top:12px;width:56px;height:56px;background:#F0B43C;display:flex;align-items:center;justify-content:center;font-size:32px;color:#0A0D12">★</div>
+</div>
+<div style="position:absolute;left:790px;top:150px;right:170px">
+<div style="font-size:54px;font-weight:700;line-height:1.2">Starfall Drift</div>
+<div style="display:flex;align-items:center;gap:20px;margin-top:24px">
+<div style="background:#161B24;padding:6px 18px;font-size:24px;color:#98A2B3">Xbox Cloud Gaming</div>
+<div style="background:#161B24;padding:6px 18px;font-size:24px;color:#98A2B3">1080p HQ</div>
+<div style="background:#161B24;padding:6px 18px;font-size:24px;color:#F0B43C">★ Favorite</div>
+</div>
+<div style="font-size:30px;color:#98A2B3;margin-top:28px">Last played · yesterday</div>
+<div style="margin-top:64px;display:flex;flex-direction:column;gap:24px;width:640px">
+<div style="position:relative;background:#107C10;padding:26px 0;text-align:center;font-size:38px;font-weight:800;border:6px solid #2FBF2F;box-shadow:0 0 0 6px rgba(47,191,47,.4),0 0 0 14px rgba(47,191,47,.15);box-sizing:border-box">▶ Play</div>
+<div style="background:#161B24;padding:24px 0;text-align:center;font-size:38px;color:#F0F3F8">★ Remove favorite</div>
+<div style="background:#161B24;padding:24px 0;text-align:center;font-size:38px;color:#F0F3F8">Play on… <span style="color:#98A2B3">xCloud</span></div>
+</div>
+<div style="font-size:24px;color:#5b6474;margin-top:48px">Streams in your account's language · change in Settings</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;height:84px;background:#0E1118;border-top:2px solid #1C2230;display:flex;align-items:center;justify-content:flex-end;gap:36px;padding:0 60px;box-sizing:border-box">
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#107C10;color:#fff;font-weight:800;font-size:24px;display:inline-flex;align-items:center;justify-content:center">A</span><span style="font-size:24px;color:#F0F3F8">Select</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">B</span><span style="font-size:24px;color:#98A2B3">Back</span></span>
+</div>
+</div>
+<div class="dv-note"><b>Por qué detalle y no lanzamiento directo:</b> el coste es UN press extra de A (Play ya está enfocado al entrar: A-A lanza igual de rápido), y a cambo se gana espacio para favorito sin memorizar X, el selector de origen por-juego y sitio para el roadmap (logros, tiempo jugado). La misma textura de carátula se reutiliza escalada (520×780 = 2× la de parrilla; SDL escala texturas gratis). "Play on…" solo se dibuja con consola vinculada. <b>Primitivas:</b> textura + fills kSurface para chips/botones + foco estándar sobre el botón activo (borde 6 + 2 glow frames, sin escala en botones — solo cambia fill a kAccent).</div></div>
+
+<!-- ============ 1g SETTINGS ============ -->
+<div class="dv-opt" id="1g"><div class="dv-olabel"><a class="dv-oid" href="#1g">1g</a>Ajustes — foco de fila con barra lateral, valor con carets ‹ ›</div>
+<div class="dv-card" style="width:1920px;height:1080px;position:relative;overflow:hidden;color:#F0F3F8;font-family:'M PLUS 1p',sans-serif" data-screen-label="Settings">
+<div style="position:absolute;left:60px;top:48px;font-size:54px;font-weight:700">Settings</div>
+<div style="position:absolute;left:120px;top:170px;right:120px;display:flex;flex-direction:column;gap:18px">
+<div style="position:relative;height:96px;background:#212836;border:4px solid #2FBF2F;box-shadow:0 0 0 5px rgba(47,191,47,.35);display:flex;align-items:center;justify-content:space-between;padding:0 44px;box-sizing:border-box">
+<div style="position:absolute;left:0;top:0;bottom:0;width:10px;background:#2FBF2F"></div>
+<div style="font-size:38px;font-weight:700;margin-left:24px">Stream quality</div>
+<div style="display:flex;align-items:center;gap:28px"><span style="font-size:38px;color:#98A2B3">‹</span><span style="font-size:38px;color:#2FBF2F;font-weight:700">1080p high bitrate</span><span style="font-size:38px;color:#98A2B3">›</span></div>
+</div>
+<div style="height:96px;background:#161B24;display:flex;align-items:center;justify-content:space-between;padding:0 44px;box-sizing:border-box">
+<div style="font-size:38px;margin-left:24px;color:#F0F3F8">Button layout</div>
+<div style="font-size:38px;color:#107C10">Positional (Switch A = Xbox B)</div>
+</div>
+<div style="height:96px;background:#161B24;display:flex;align-items:center;justify-content:space-between;padding:0 44px;box-sizing:border-box">
+<div style="font-size:38px;margin-left:24px;color:#F0F3F8">Vibration</div>
+<div style="font-size:38px;color:#107C10">Medium</div>
+</div>
+<div style="height:96px;background:#161B24;display:flex;align-items:center;justify-content:space-between;padding:0 44px;box-sizing:border-box">
+<div style="font-size:38px;margin-left:24px;color:#F0F3F8">Region bypass</div>
+<div style="font-size:38px;color:#107C10">Off</div>
+</div>
+<div style="height:96px;background:#161B24;display:flex;align-items:center;justify-content:space-between;padding:0 44px;box-sizing:border-box">
+<div style="font-size:38px;margin-left:24px;color:#F0F3F8">Game language</div>
+<div style="font-size:38px;color:#107C10">English (US)</div>
+</div>
+</div>
+<div style="position:absolute;left:120px;right:120px;bottom:140px;background:#0E1118;border:2px solid #1C2230;padding:28px 44px;box-sizing:border-box;display:flex;gap:24px;align-items:flex-start">
+<div style="width:8px;height:64px;background:#107C10;flex:none"></div>
+<div style="font-size:30px;color:#98A2B3;line-height:1.6">Higher quality needs a stronger connection — 5 GHz Wi-Fi or docked LAN is recommended for 1080p high bitrate.</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;height:84px;background:#0E1118;border-top:2px solid #1C2230;display:flex;align-items:center;justify-content:flex-end;gap:36px;padding:0 60px;box-sizing:border-box">
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="min-width:40px;height:40px;padding:0 8px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">◀ ▶</span><span style="font-size:24px;color:#98A2B3">Change</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">B</span><span style="font-size:24px;color:#98A2B3">Back</span></span>
+</div>
+</div>
+<div class="dv-note"><b>Foco de fila</b> (variante para elementos anchos, donde escalar molesta): fill kSurfaceHi + barra lateral 10px kFocus + frame 4px kFocus + 1 glow frame 5px alpha 90 + valor en kFocus con carets ‹ › (U+2039/203A). Filas sin foco: fill kSurface, valor kAccent. <b>Nota contextual:</b> caja fija (no texto flotante): fill kBar + frame 2px + barra 8px kAccent + text S; cambia con la fila enfocada; usa kWarn en la barra cuando Region bypass ≠ Off. <b>Primitivas por fila:</b> 1–2 fill + 1 frame + 3 text.</div></div>
+
+<!-- ============ 1h STREAM CONNECTING ============ -->
+<div class="dv-opt" id="1h"><div class="dv-olabel"><a class="dv-oid" href="#1h">1h</a>Stream — conectando</div>
+<div class="dv-card" style="width:1920px;height:1080px;position:relative;overflow:hidden;color:#F0F3F8;font-family:'M PLUS 1p',sans-serif;background:#000" data-screen-label="Stream connecting">
+<div style="position:absolute;left:0;right:0;top:300px;display:flex;flex-direction:column;align-items:center">
+<div style="width:160px;height:240px;background:#233047;position:relative"><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:54px;font-weight:800;color:rgba(255,255,255,.14)">SD</div></div>
+<div style="font-size:54px;font-weight:700;margin-top:44px">Starfall Drift</div>
+<div style="font-size:30px;color:#98A2B3;margin-top:16px">Negotiating connection…</div>
+<div style="width:560px;height:6px;background:#1C2230;margin-top:44px;position:relative"><div style="position:absolute;left:0;top:0;height:6px;width:336px;background:#2FBF2F"></div></div>
+<div style="display:flex;gap:32px;margin-top:20px;font-size:24px;color:#5b6474">
+<span style="color:#2FBF2F">Session</span><span style="color:#2FBF2F">ICE</span><span style="color:#F0F3F8">DTLS</span><span>Video</span>
+</div>
+</div>
+<div style="position:absolute;right:60px;top:48px;background:rgba(22,27,36,.85);padding:8px 20px;font-size:24px;color:#98A2B3">xCloud · 1080p HQ</div>
+<div style="position:absolute;left:0;right:0;bottom:0;height:84px;display:flex;align-items:center;justify-content:flex-end;gap:36px;padding:0 60px;box-sizing:border-box">
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">B</span><span style="font-size:24px;color:#98A2B3">Cancel</span></span>
+</div>
+</div>
+<div class="dv-note"><b>Fondo #000 puro</b> (el vídeo llegará sobre negro; evita un flash de color al hacer el handoff SDL→deko3d). La carátula ya está en memoria (misma textura de la parrilla, 160×240). <b>Barra de fases:</b> las 4 etapas reales del engine (Session/ICE/DTLS/Video) como text XS — completadas en kFocus, actual en kText, pendientes en #5b6474; la barra de progreso avanza ¼ por fase. Es honesto y diagnóstico: si se atasca, el usuario ve dónde. Al conectar: overlay 8 s "Hold − and + together to leave the stream" en banda inferior rgba(0,0,0,.6) + text XS (fill alpha + text, ya soportado).</div></div>
+
+<!-- ============ 1i STREAM FAILED ============ -->
+<div class="dv-opt" id="1i"><div class="dv-olabel"><a class="dv-oid" href="#1i">1i</a>Stream — fallo</div>
+<div class="dv-card" style="width:1920px;height:1080px;position:relative;overflow:hidden;color:#F0F3F8;font-family:'M PLUS 1p',sans-serif;background:#000" data-screen-label="Stream failed">
+<div style="position:absolute;left:0;top:0;right:0;height:8px;background:#E86868"></div>
+<div style="position:absolute;left:460px;top:250px;width:1000px;background:#0E1118;border:2px solid #2A3242;box-sizing:border-box">
+<div style="display:flex;align-items:center;gap:24px;padding:36px 48px;border-bottom:2px solid #1C2230">
+<div style="width:56px;height:56px;background:#2A1416;border:3px solid #E86868;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:800;color:#E86868;box-sizing:border-box">!</div>
+<div style="font-size:54px;font-weight:700;color:#E86868">Stream failed</div>
+</div>
+<div style="padding:36px 48px">
+<div style="font-size:38px;line-height:1.5">The console lost connection to the streaming server (ICE timeout).</div>
+<div style="font-size:30px;color:#98A2B3;margin-top:20px">Starfall Drift · after 12 min</div>
+<div style="margin-top:28px;background:#161B24;padding:14px 24px;font-size:24px;color:#98A2B3;font-family:'JetBrains Mono',monospace">log: /switch/green-nx/stream-log.txt</div>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;height:84px;background:#0E1118;border-top:2px solid #1C2230;display:flex;align-items:center;justify-content:flex-end;gap:36px;padding:0 60px;box-sizing:border-box">
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#107C10;color:#fff;font-weight:800;font-size:24px;display:inline-flex;align-items:center;justify-content:center">A</span><span style="font-size:24px;color:#F0F3F8">Retry</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">B</span><span style="font-size:24px;color:#98A2B3">Back to library</span></span>
+</div>
+</div>
+<div class="dv-note"><b>Estructura en vez de texto suelto:</b> banda superior 8px kError (señal periférica inmediata) + tarjeta 1000px con cabecera (glifo "!" en caja 56×56: fill #2A1416 + frame 3px kError), cuerpo (mensaje M truncado a 2 líneas, contexto S dim) y ruta de log en caja kSurface. <b>Primitivas:</b> 5 fill + 3 frame + 6 text. El mismo esqueleto de tarjeta se reutiliza en <a class="dv-oid" href="#1j">1j</a>.</div></div>
+
+<!-- ============ 1j FATAL ============ -->
+<div class="dv-opt" id="1j"><div class="dv-olabel"><a class="dv-oid" href="#1j">1j</a>Error fatal — con sugerencia accionable (caso geo-gate)</div>
+<div class="dv-card" style="width:1920px;height:1080px;position:relative;overflow:hidden;color:#F0F3F8;font-family:'M PLUS 1p',sans-serif" data-screen-label="Fatal error">
+<div style="position:absolute;left:0;top:0;right:0;height:8px;background:#E86868"></div>
+<div style="position:absolute;left:410px;top:180px;width:1100px;background:#0E1118;border:2px solid #2A3242;box-sizing:border-box">
+<div style="display:flex;align-items:center;gap:24px;padding:36px 48px;border-bottom:2px solid #1C2230">
+<div style="width:56px;height:56px;background:#2A1416;border:3px solid #E86868;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:800;color:#E86868;box-sizing:border-box">!</div>
+<div style="font-size:54px;font-weight:700;color:#E86868">Something went wrong</div>
+</div>
+<div style="padding:36px 48px">
+<div style="font-size:38px;line-height:1.5">Streaming login failed: this account's region is not supported by Xbox Cloud Gaming (HTTP 403).</div>
+<div style="margin-top:32px;background:#161B24;border:2px solid #F0B43C;padding:28px 32px;display:flex;gap:24px;box-sizing:border-box">
+<div style="width:8px;background:#F0B43C;flex:none"></div>
+<div style="font-size:30px;color:#F0F3F8;line-height:1.6">Xbox Cloud Gaming may be unavailable in your region.<br><span style="color:#98A2B3">Press <b style="color:#F0F3F8">ZL</b> to open Settings, turn on <b style="color:#F0F3F8">Region bypass</b>, then press <b style="color:#F0F3F8">X</b> to retry.</span></div>
+</div>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;bottom:0;height:84px;background:#0E1118;border-top:2px solid #1C2230;display:flex;align-items:center;justify-content:flex-end;gap:36px;padding:0 60px;box-sizing:border-box">
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#107C10;color:#fff;font-weight:800;font-size:24px;display:inline-flex;align-items:center;justify-content:center">X</span><span style="font-size:24px;color:#F0F3F8">Retry</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="min-width:40px;height:40px;padding:0 8px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">ZL</span><span style="font-size:24px;color:#98A2B3">Settings</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">−</span><span style="font-size:24px;color:#98A2B3">Sign out</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">+</span><span style="font-size:24px;color:#98A2B3">Exit</span></span>
+</div>
+</div>
+<div class="dv-note"><b>Misma tarjeta que <a class="dv-oid" href="#1i">1i</a></b> + caja de sugerencia (frame 2px kWarn + barra 8px kWarn) que solo se dibuja cuando el error contiene "streaming login". La acción primaria (X Retry) usa el chip verde. Mensajes largos: truncar a 2 líneas de 38px (~90 chars), el detalle completo va al log.</div></div>
+
+<!-- ============ 1k SOURCE PICKER ============ -->
+<div class="dv-opt" id="1k"><div class="dv-olabel"><a class="dv-oid" href="#1k">1k</a>Roadmap: "Play on" — pantalla previa, SOLO si hay consola vinculada</div>
+<div class="dv-card" style="width:1920px;height:1080px;position:relative;overflow:hidden;color:#F0F3F8;font-family:'M PLUS 1p',sans-serif" data-screen-label="Source picker">
+<div style="position:absolute;left:0;right:0;top:150px;text-align:center;font-size:54px;font-weight:700">Play Starfall Drift on…</div>
+<div style="position:absolute;left:0;right:0;top:300px;display:flex;justify-content:center;gap:56px">
+<div style="width:560px;background:#212836;border:6px solid #2FBF2F;box-shadow:0 0 0 6px rgba(47,191,47,.4),0 0 0 14px rgba(47,191,47,.15);box-sizing:border-box;padding:56px 48px">
+<div style="width:72px;height:72px;background:#107C10;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800;color:#fff">☁</div>
+<div style="font-size:38px;font-weight:800;margin-top:36px">xCloud</div>
+<div style="font-size:30px;color:#98A2B3;margin-top:12px;line-height:1.6">Play in the cloud.<br>No console needed.</div>
+<div style="display:flex;align-items:center;gap:12px;margin-top:40px"><div style="width:12px;height:12px;background:#2FBF2F"></div><div style="font-size:24px;color:#98A2B3">Ready · 1080p HQ</div></div>
+</div>
+<div style="width:560px;background:#161B24;box-sizing:border-box;padding:56px 48px">
+<div style="width:72px;height:72px;background:#1C2230;border:2px solid #2A3242;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800;color:#98A2B3;box-sizing:border-box">⌂</div>
+<div style="font-size:38px;font-weight:800;margin-top:36px">Your Xbox</div>
+<div style="font-size:30px;color:#98A2B3;margin-top:12px;line-height:1.6">Remote play from<br>SERIES X · living room</div>
+<div style="display:flex;align-items:center;gap:12px;margin-top:40px"><div style="width:12px;height:12px;background:#2FBF2F"></div><div style="font-size:24px;color:#98A2B3">Online · local network</div></div>
+</div>
+</div>
+<div style="position:absolute;left:0;right:0;top:880px;text-align:center;font-size:24px;color:#5b6474">Hold A on either option to make it the default and skip this screen</div>
+<div style="position:absolute;left:0;right:0;bottom:0;height:84px;background:#0E1118;border-top:2px solid #1C2230;display:flex;align-items:center;justify-content:flex-end;gap:36px;padding:0 60px;box-sizing:border-box">
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#107C10;color:#fff;font-weight:800;font-size:24px;display:inline-flex;align-items:center;justify-content:center">A</span><span style="font-size:24px;color:#F0F3F8">Play</span></span>
+<span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">B</span><span style="font-size:24px;color:#98A2B3">Back</span></span>
+</div>
+</div>
+<div class="dv-note"><b>Regla de visibilidad (protege el caso mayoritario):</b> sin consola vinculada esta pantalla NO existe — A lanza xCloud directo y el chip de cabecera de <a class="dv-oid" href="#1e">1e</a> tampoco se dibuja. Con consola vinculada aparece 1 vez; "hold A" fija el default (settings.json) y a partir de ahí se vuelve a lanzamiento directo, con el chip de cabecera como recordatorio + fila nueva en Ajustes ("Preferred source") para cambiarlo. Iconos ☁ (U+2601) y ⌂ (U+2302): glifos Unicode de la fuente; si faltan, textura 72×72 pre-renderizada.</div></div>
+
+<!-- ============ 1l EMPTY ============ -->
+<div class="dv-opt" id="1l"><div class="dv-olabel"><a class="dv-oid" href="#1l">1l</a>Estado vacío — Favorites (mismo patrón para History y búsqueda)</div>
+<div class="dv-card" style="width:1920px;height:1080px;position:relative;overflow:hidden;color:#F0F3F8;font-family:'M PLUS 1p',sans-serif" data-screen-label="Empty favorites">
+<div style="position:absolute;left:60px;top:48px;display:flex;align-items:center;gap:20px">
+<div style="width:44px;height:44px;background:#107C10;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;color:#fff">nx</div>
+<div style="font-size:30px;font-weight:700">green-nx</div>
+</div>
+<div style="position:absolute;right:60px;top:48px;font-size:24px;color:#98A2B3">SgtNugget</div>
+<div style="position:absolute;left:170px;top:124px;display:flex;align-items:center;gap:44px">
+<span style="min-width:36px;height:36px;background:#1C2230;border:2px solid #2A3242;color:#98A2B3;font-weight:700;font-size:22px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">L</span>
+<span style="font-size:38px;color:#5b6474">All games</span>
+<div style="position:relative;padding-bottom:12px"><span style="font-size:38px;font-weight:700;color:#F0F3F8">Favorites</span><div style="position:absolute;left:0;right:0;bottom:0;height:5px;background:#107C10"></div></div>
+<span style="font-size:38px;color:#5b6474">History</span>
+<span style="min-width:36px;height:36px;background:#1C2230;border:2px solid #2A3242;color:#98A2B3;font-weight:700;font-size:22px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">R</span>
+</div>
+<div style="position:absolute;left:0;right:0;top:380px;display:flex;flex-direction:column;align-items:center">
+<div style="width:120px;height:120px;background:#161B24;display:flex;align-items:center;justify-content:center;font-size:64px;color:#F0B43C">★</div>
+<div style="font-size:38px;font-weight:700;margin-top:40px">No favorites yet</div>
+    <div style="display:flex;align-items:center;gap:14px;margin-top:20px">
+      <span style="font-size:30px;color:#98A2B3">Press</span>
+      <span style="width:36px;height:36px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:22px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">X</span>
+      <span style="font-size:30px;color:#98A2B3">on any game to pin it here</span>
+    </div>
+  </div>
+  <div style="position:absolute;left:0;right:0;bottom:0;height:84px;background:#0E1118;border-top:2px solid #1C2230;display:flex;align-items:center;justify-content:flex-end;gap:36px;padding:0 60px;box-sizing:border-box">
+    <span style="display:inline-flex;align-items:center;gap:12px"><span style="min-width:40px;height:40px;padding:0 8px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">L R</span><span style="font-size:24px;color:#98A2B3">Tabs</span></span>
+    <span style="display:inline-flex;align-items:center;gap:12px"><span style="min-width:40px;height:40px;padding:0 8px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">ZL</span><span style="font-size:24px;color:#98A2B3">Settings</span></span>
+    <span style="display:inline-flex;align-items:center;gap:12px"><span style="width:40px;height:40px;background:#1C2230;border:2px solid #2A3242;color:#F0F3F8;font-weight:700;font-size:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box">+</span><span style="font-size:24px;color:#98A2B3">Exit</span></span>
+  </div>
+</div>
+<div class="dv-note"><b>Patrón:</b> glifo grande en caja 120×120 kSurface (★ favoritos / ⌚ o texto "…" history / sin caja en búsqueda) + título M bold + instrucción S con el chip del botón embebido en la línea. Variantes: History → "Nothing played yet — games you launch appear here"; búsqueda → «Nothing found for "halo"» + hint Y. El footer omite A/X/Y (no hay tarjetas sobre las que actuar).</div></div>
+
+</div>
+<p style="margin:28px 0 0;font:13px/1.6 'M PLUS 1p',sans-serif;color:rgba(255,255,255,.45)">Siguientes pasos: "haz una variante gamer de <a class="dv-oid" href="#1e">1e</a> con el verde más protagonista" · "enséñame el overlay del hint de salida sobre vídeo" · "exporta la spec como documento imprimible"</p>
+</section>
+
+</x-dc>
+</body>
+</html>

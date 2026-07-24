@@ -16,18 +16,24 @@ struct Color {
     Uint8 r, g, b, a = 255;
 };
 
-// Palette
-constexpr Color kBg{16, 18, 24};
-constexpr Color kBgAccent{24, 28, 38};
-constexpr Color kCard{34, 39, 52};
-constexpr Color kCardFocus{16, 124, 16};  // Xbox green
-constexpr Color kText{235, 238, 245};
-constexpr Color kTextDim{150, 156, 170};
-constexpr Color kAccent{16, 124, 16};
-constexpr Color kWarn{240, 180, 60};
-constexpr Color kError{230, 90, 90};
+// Palette — "OLED premium" (docs-design/green-nx-redesign.dc.html, card 1a)
+constexpr Color kBg{10, 13, 18};          // #0A0D12 global background
+constexpr Color kBar{14, 17, 24};         // #0E1118 footer / header bands
+constexpr Color kSurface{22, 27, 36};     // #161B24 cards, rows, name plates
+constexpr Color kSurfaceHi{33, 40, 54};   // #212836 focused surface / chips
+constexpr Color kAccent{16, 124, 16};     // #107C10 brand, active tabs, values
+constexpr Color kFocus{47, 191, 47};      // #2FBF2F ONLY for the focus system
+constexpr Color kText{240, 243, 248};     // #F0F3F8 primary text
+constexpr Color kTextDim{152, 162, 179};  // #98A2B3 secondary text, hints
+constexpr Color kWarn{240, 180, 60};      // #F0B43C favorites, notices
+constexpr Color kError{232, 104, 104};    // #E86868 errors
+constexpr Color kChip{28, 34, 48};        // #1C2230 button chips, separators
+constexpr Color kChipEdge{42, 50, 66};    // #2A3242 chip border
+constexpr Color kFaint{91, 100, 116};     // #5b6474 tertiary (counters, idle tabs)
 
-enum class FontSize { Small = 0, Body, Title, Huge, Mono };
+// XS 24 hints/captions · Note(S) 30 metadata/status · Body(M) 38 tabs/rows ·
+// Title(L) 54 screen+game titles · Huge(XL) 100 sign-in code, logo.
+enum class FontSize { Small = 0, Body, Title, Huge, Note };
 
 class Gfx {
 public:
