@@ -254,7 +254,7 @@ index c763e80..cecbe66 100644
  };
  
  static void peer_connection_outgoing_rtp_packet(uint8_t* data, size_t size, void* user_data) {
-@@ -92,6 +96,23 @@ static void peer_connection_incoming_rtcp(PeerConnection* pc, uint8_t* buf, size
+@@ -92,6 +96,22 @@ static void peer_connection_incoming_rtcp(PeerConnection* pc, uint8_t* buf, size
      rtcp_header = (RtcpHeader*)(buf + pos);
  
      switch (rtcp_header->type) {
@@ -271,7 +271,6 @@ index c763e80..cecbe66 100644
 +          ntp_frac = ntohl(ntp_frac);
 +          pc->rtcp_last_sr_lsr = (ntp_sec << 16) | (ntp_frac >> 16);
 +          pc->rtcp_last_sr_time = ports_get_epoch_time();
-+          LOGI("RTCP SR received (lsr=%08x)", pc->rtcp_last_sr_lsr);
 +        }
 +        break;
 +      }

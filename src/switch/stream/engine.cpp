@@ -106,7 +106,6 @@ void Engine::log(const std::string& line) {
     std::fprintf(log_file_, "[%8llu] %s\n",
                  static_cast<unsigned long long>(SDL_GetTicks64()),
                  line.c_str());
-    std::fflush(log_file_);
 }
 
 void Engine::start(const std::string& title_id, QualityTier tier,
@@ -136,6 +135,12 @@ void Engine::start_common(const std::string& title_id, QualityTier tier,
         std::rename("sdmc:/switch/green-nx/stream-log.txt",
                     "sdmc:/switch/green-nx/stream-log-prev.txt");
         log_file_ = std::fopen("sdmc:/switch/green-nx/stream-log.txt", "w");
+        // Logging is diagnostic and must not stall the sole RTP socket pump.
+        // A synchronous fflush for the once-per-second audio line was enough
+        // to produce a small regular video hitch on SD cards. Keep the session
+        // in memory and let fclose() flush it on clean stream shutdown (fail()
+        // flushes once so an error report still reaches the card).
+        if (log_file_) std::setvbuf(log_file_, nullptr, _IOFBF, 256 * 1024);
 #else
         log_file_ = stderr;
 #endif
@@ -233,6 +238,13 @@ void Engine::set_status(const std::string& status) {
 
 void Engine::fail(const std::string& error) {
     log("FAIL: " + error);
+    {
+        // The log is fully buffered (setvbuf in start_common); a failure is
+        // exactly when it must survive on the card, and the stream is dead
+        // here so one synchronous flush costs nothing.
+        std::lock_guard<std::mutex> lock(log_mutex_);
+        if (log_file_) std::fflush(log_file_);
+    }
     {
         std::lock_guard<std::mutex> lock(status_mutex_);
         error_ = error;
@@ -704,7 +716,6 @@ bool Engine::run_peer(GssvSession& session) {
         if (log_file_) {
             std::fprintf(log_file_, "----- OFFER -----\n%s\n----- ANSWER -----\n%s\n-----\n",
                          munged.c_str(), answer.c_str());
-            std::fflush(log_file_);
         }
     }
 
@@ -787,8 +798,48 @@ bool Engine::run_peer(GssvSession& session) {
     }
     log("remote description set, checking connectivity");
 
+    // GSSV keepalive is a blocking HTTPS request (timeout as high as 15 s).
+    // It must never run on this thread: the loop below is also the sole
+    // libpeer socket pump, and pausing it lets the Switch's UDP receive queue
+    // overflow -- in practice a video/audio hitch followed by a PLI almost
+    // exactly every 15 seconds. Run it on its own thread; after signaling
+    // completes nothing else touches `session` until run_peer returns, and
+    // the RAII joiner covers every return path (a destroyed joinable thread
+    // would std::terminate).
+    std::atomic<bool> keepalive_stop{false};
+    std::thread keepalive_thread([this, &session, &keepalive_stop] {
+        Uint64 next = SDL_GetTicks64() + 15000;
+        while (!quit_ && !keepalive_stop) {
+            Uint64 now = SDL_GetTicks64();
+            if (now < next) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(
+                    std::min<Uint64>(100, next - now)));
+                continue;
+            }
+            Uint64 started = now;
+            try {
+                session.keepalive();
+            } catch (const std::exception& error) {
+                if (!quit_ && !keepalive_stop)
+                    log(std::string("keepalive failed: ") + error.what());
+            }
+            Uint64 elapsed = SDL_GetTicks64() - started;
+            if (elapsed >= 100)
+                log("keepalive took " + std::to_string(elapsed) +
+                    "ms (off media thread)");
+            next = SDL_GetTicks64() + 15000;
+        }
+    });
+    struct KeepaliveJoiner {
+        std::atomic<bool>& stop;
+        std::thread& thread;
+        ~KeepaliveJoiner() {
+            stop = true;
+            if (thread.joinable()) thread.join();
+        }
+    } keepalive_joiner{keepalive_stop, keepalive_thread};
+
     Uint64 ice_connected_at = 0;  // when peer state first reached connected
-    Uint64 last_keepalive = SDL_GetTicks64();
     Uint64 last_rr = SDL_GetTicks64();
     Uint64 last_consent = SDL_GetTicks64();
     Uint64 last_audio_stats = SDL_GetTicks64();
@@ -944,13 +995,6 @@ bool Engine::run_peer(GssvSession& session) {
             last_consent = now;
             std::lock_guard<std::mutex> lock(peer_mutex_);
             if (peer_) peer_connection_send_consent(peer_);
-        }
-
-        if (now - last_keepalive > 15000) {
-            last_keepalive = now;
-            try {
-                session.keepalive();
-            } catch (const std::exception&) {}
         }
 
         // Only yield when idle. While video is flowing we loop right back and
