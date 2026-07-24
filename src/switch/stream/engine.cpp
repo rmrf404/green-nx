@@ -824,8 +824,18 @@ bool Engine::run_peer(GssvSession& session) {
     std::atomic<bool> keepalive_stop{false};
     std::thread keepalive_thread([this, &session, &keepalive_stop] {
         Uint64 next = SDL_GetTicks64() + 15000;
+        Uint64 next_flush = SDL_GetTicks64() + 2000;
         while (!quit_ && !keepalive_stop) {
             Uint64 now = SDL_GetTicks64();
+            // The buffered log (setvbuf in start_common) reaches the card only
+            // on fclose/fail -- an app killed from HOME or a slept console
+            // loses the whole session. Flushing here keeps SD latency off the
+            // socket-pump thread and caps the loss at ~2 s of tail.
+            if (now >= next_flush) {
+                next_flush = now + 2000;
+                std::lock_guard<std::mutex> lock(log_mutex_);
+                if (log_file_) std::fflush(log_file_);
+            }
             if (now < next) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(
                     std::min<Uint64>(100, next - now)));
