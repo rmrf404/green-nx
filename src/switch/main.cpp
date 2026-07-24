@@ -1349,6 +1349,73 @@ void apply_rumble(App& app) {
 // Shared error card (cards 1i/1j): top 8px error band + a boxed card with
 // an "!" glyph header, message body, and optional context/log lines.
 // Returns the y where extra content (suggestion box) may continue.
+// Turn a raw engine/HTTP error into a short, actionable line. Unmatched errors
+// fall through unchanged; the full text is always in stream-log.txt.
+std::string friendly_error(const std::string& raw) {
+    std::string s = lowercase(raw);
+    auto has = [&](const char* n) { return s.find(n) != std::string::npos; };
+    if (has("resolve host") || has("couldn't resolve") || has("could not resolve"))
+        return "Couldn't reach Microsoft sign-in (DNS). Check your connection; "
+               "on a shared PC or phone hotspot, set a manual DNS such as "
+               "1.1.1.1 on the console.";
+    if (has("timed out") || has("timeout"))
+        return "The connection timed out. Check your network and try again.";
+    if (has("connection refused") || has("connect to host") ||
+        has("couldn't connect") || has("could not connect"))
+        return "Couldn't connect to the server. Check your internet and retry.";
+    if (has("agentcommanderror"))
+        return "Your console didn't accept the session. Make sure it's on (or "
+               "in Instant-on) and try again.";
+    if (has("401") || has("403") || has("unauthorized") || has("token"))
+        return "Sign-in expired or was rejected. Try signing in again.";
+    return raw;
+}
+
+// Word-wrap `text` to lines no wider than max_width at `size`, drawing them from
+// (x, y) downward; caps at max_lines and ellipsizes the overflow. Returns the y
+// just past the last line. Fixes long errors spilling outside their card.
+int draw_text_wrapped(App& app, const std::string& text, int x, int y,
+                      gfx::FontSize size, gfx::Color color, int max_width,
+                      int line_h, int max_lines) {
+    auto width = [&](const std::string& s) { return app.gfx.text_width(s, size); };
+    std::vector<std::string> words;
+    for (size_t i = 0; i < text.size();) {
+        while (i < text.size() && text[i] == ' ') ++i;
+        size_t start = i;
+        while (i < text.size() && text[i] != ' ') ++i;
+        if (i > start) words.push_back(text.substr(start, i - start));
+    }
+    std::string line;
+    int lines = 0;
+    for (size_t w = 0; w < words.size(); ++w) {
+        std::string cand = line.empty() ? words[w] : line + " " + words[w];
+        if (width(cand) <= max_width) {
+            line = cand;
+            continue;
+        }
+        if (line.empty()) {  // a single word wider than the box: hard-truncate
+            line = words[w];
+            while (line.size() > 1 && width(line) > max_width) line.pop_back();
+            continue;
+        }
+        if (lines >= max_lines - 1) {  // no more room: ellipsize and stop
+            while (!line.empty() && width(line + "...") > max_width) line.pop_back();
+            app.gfx.text(line + "...", x, y, size, color);
+            return y + line_h;
+        }
+        app.gfx.text(line, x, y, size, color);
+        y += line_h;
+        ++lines;
+        line = words[w];
+        while (line.size() > 1 && width(line) > max_width) line.pop_back();
+    }
+    if (!line.empty()) {
+        app.gfx.text(line, x, y, size, color);
+        y += line_h;
+    }
+    return y;
+}
+
 int draw_error_card(App& app, const SDL_Rect& card, const char* title,
                     const std::string& message, const std::string& context,
                     bool show_log_path) {
@@ -1366,14 +1433,9 @@ int draw_error_card(App& app, const SDL_Rect& card, const char* title,
     app.gfx.fill({card.x, card.y + 128, card.w, 2}, gfx::kChip);
 
     int y = card.y + 164;
-    app.gfx.text(message.substr(0, 60), card.x + 48, y, gfx::FontSize::Body,
-                 gfx::kText);
-    if (message.size() > 60) {
-        y += 52;
-        app.gfx.text(message.substr(60, 60), card.x + 48, y,
-                     gfx::FontSize::Body, gfx::kText);
-    }
-    y += 60;
+    y = draw_text_wrapped(app, friendly_error(message), card.x + 48, y,
+                          gfx::FontSize::Body, gfx::kText, card.w - 96, 46, 4);
+    y += 12;
     if (!context.empty()) {
         app.gfx.text(context, card.x + 48, y, gfx::FontSize::Note,
                      gfx::kTextDim);
