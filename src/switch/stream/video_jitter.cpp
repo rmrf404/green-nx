@@ -8,8 +8,11 @@ namespace gnx::stream {
 namespace {
 
 constexpr size_t kMaxAccessUnitBytes = 2 * 1024 * 1024;
-constexpr uint64_t kHoldMs = 90;   // hold an incomplete frame this long for
-                                   // retransmit/reorder before giving up
+// Allow enough time for a NACK round trip on a distant xCloud route. At 90 ms,
+// a single video packet arriving just after the deadline discarded the whole
+// predictive chain and froze output until a new IDR. The added delay applies
+// only while a frame is already incomplete; healthy frames still emit at once.
+constexpr uint64_t kHoldMs = 200;
 constexpr size_t kMaxFrames = 32;  // safety cap on buffered frames
 const uint8_t kStartCode[4] = {0x00, 0x00, 0x00, 0x01};
 
@@ -109,6 +112,7 @@ void VideoJitterBuffer::reset() {
     frames_.clear();
     last_ts_.reset();
     waiting_keyframe_ = true;
+    stats_ = {};
     have_seq_ = false;
     max_seq_ = 0;
     cycles_ = base_seq_ = received_ = received_prior_ = expected_prior_ = 0;

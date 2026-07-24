@@ -12,6 +12,7 @@
 
 #include <cstdarg>
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <optional>
 #include <vector>
@@ -36,6 +37,14 @@ public:
     DkVideoRenderer& operator=(const DkVideoRenderer&) = delete;
 
     void set_logger(LogFn fn) { log_ = std::move(fn); }
+    void set_sharpness(int level) {
+        sharpness_ = level < 0 ? 0 : (level > 5 ? 5 : level);
+        transform_dirty_ = true;
+    }
+    void set_contrast(int level) {
+        contrast_ = level < 0 ? 0 : (level > 4 ? 4 : level);
+        transform_dirty_ = true;
+    }
 
     // Bring up the deko3d device/swapchain. Call after SDL has released the
     // window. Returns false (and logs) on failure.
@@ -47,6 +56,18 @@ public:
     bool render(AVFrame* frame);
 
     bool initialized() const { return initialized_; }
+
+    struct TimingStats {
+        uint64_t renders = 0;
+        uint64_t acquire_total_us = 0;
+        uint64_t acquire_max_us = 0;
+        uint64_t present_total_us = 0;
+        uint64_t present_max_us = 0;
+        uint64_t idle_total_us = 0;
+        uint64_t idle_max_us = 0;
+    };
+    // Return and reset render timing accumulated since the previous call.
+    TimingStats take_timing_stats();
 
 private:
     // Triple-buffered: with the ~60 Hz software present pacer (Engine::pump_video)
@@ -130,6 +151,18 @@ private:
     bool color_full_ = false;
     bool warned_not_hw_ = false;
     bool logged_surface_ = false;
+    int sharpness_ = 2;            // 0..4 fixed; 5 = 3-second strobe test
+    int effective_sharpness_ = -1; // actual 0..4 level currently rendered
+    int contrast_ = 0;             // 0..3 fixed; 4 = 3-second strobe test
+    int effective_contrast_ = -1;
+
+    std::atomic<uint64_t> timing_renders_{0};
+    std::atomic<uint64_t> timing_acquire_total_us_{0};
+    std::atomic<uint64_t> timing_acquire_max_us_{0};
+    std::atomic<uint64_t> timing_present_total_us_{0};
+    std::atomic<uint64_t> timing_present_max_us_{0};
+    std::atomic<uint64_t> timing_idle_total_us_{0};
+    std::atomic<uint64_t> timing_idle_max_us_{0};
 };
 
 }  // namespace gnx::stream

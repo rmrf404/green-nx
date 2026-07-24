@@ -33,6 +33,25 @@ constexpr u64 kOutWaitNs = 100000000ULL;  // 100 ms; re-check quit_ on timeout
 }  // namespace
 
 bool AudioPlayer::init() {
+    // Engine instances are reused when returning to the library and launching
+    // another stream. A new session has a new RTP sequence space, so no audio
+    // reorder or telemetry state may leak across starts.
+    reorder_.reset();
+    {
+        std::lock_guard<std::mutex> lock(inbox_mutex_);
+        inbox_.clear();
+    }
+    received_.store(0, std::memory_order_relaxed);
+    played_.store(0, std::memory_order_relaxed);
+    failed_.store(0, std::memory_order_relaxed);
+    lost_.store(0, std::memory_order_relaxed);
+    underruns_.store(0, std::memory_order_relaxed);
+    dropped_samples_.store(0, std::memory_order_relaxed);
+    frames_.store(0, std::memory_order_relaxed);
+    out_samples_.store(0, std::memory_order_relaxed);
+    ema_ms_.store(0, std::memory_order_relaxed);
+    adj_ppm_.store(0, std::memory_order_relaxed);
+
     int error = 0;
     decoder_ = opus_decoder_create(kSampleRate, kChannels, &error);
     if (error != OPUS_OK) return false;

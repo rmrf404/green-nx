@@ -134,6 +134,9 @@ struct SwitchRumble {
 
 struct Settings {
     int quality = 2;    // 0=720p, 1=1080p, 2=1080p HQ
+    int pacing = 0;     // 0=low latency, 1=smooth
+    int sharpness = 2;  // 0..4 fixed strength, 5=strobe test
+    int contrast = 0;   // 0..3 fixed strength, 4=strobe test
     int mapping = 0;    // 0=positional, 1=match labels
     int vibration = 2;  // rumble intensity: 0=Off, 1=Low, 2=Medium, 3=High
     int region = 0;     // region-bypass IP: 0=Off, else index into kRegion*
@@ -197,6 +200,9 @@ Settings load_settings() {
     json data = json::parse(in, nullptr, false);
     if (data.is_discarded()) return settings;
     settings.quality = std::clamp(data.value("quality", 2), 0, 2);
+    settings.pacing = std::clamp(data.value("pacing", 0), 0, 1);
+    settings.sharpness = std::clamp(data.value("sharpness", 2), 0, 5);
+    settings.contrast = std::clamp(data.value("contrast", 0), 0, 4);
     settings.mapping = std::clamp(data.value("mapping", 0), 0, 1);
     // "vibration" was an on/off bool before intensity levels existed; migrate.
     if (data.contains("vibration") && data["vibration"].is_boolean())
@@ -213,6 +219,9 @@ Settings load_settings() {
 void save_settings(const Settings& settings) {
     std::ofstream out(data_path("settings.json"), std::ios::trunc);
     out << json{{"quality", settings.quality},
+                {"pacing", settings.pacing},
+                {"sharpness", settings.sharpness},
+                {"contrast", settings.contrast},
                 {"mapping", settings.mapping},
                 {"vibration", settings.vibration},
                 {"region", settings.region},
@@ -620,6 +629,11 @@ void draw_library(App& app) {
 }
 
 const char* kQualityLabels[3] = {"720p", "1080p", "1080p high bitrate"};
+const char* kPacingLabels[2] = {"Low latency", "Smooth"};
+const char* kSharpnessLabels[6] = {
+    "Off", "Low", "Medium", "High", "Extreme", "Strobe test"};
+const char* kContrastLabels[5] = {
+    "Off", "Low", "Medium", "High", "Strobe test"};
 const char* kMappingLabels[2] = {"Positional (Switch A = Xbox B)",
                                  "Match labels (Switch A = Xbox A)"};
 
@@ -630,40 +644,72 @@ void draw_settings(App& app) {
         const char* title;
         std::string value;
     };
-    Row rows[5] = {
+    Row rows[8] = {
         {"Stream quality", kQualityLabels[app.settings.quality]},
+        {"Video pacing", kPacingLabels[app.settings.pacing]},
+        {"Luma sharpening", kSharpnessLabels[app.settings.sharpness]},
+        {"Contrast", kContrastLabels[app.settings.contrast]},
         {"Button layout", kMappingLabels[app.settings.mapping]},
         {"Vibration", kVibrationLabels[app.settings.vibration]},
         {"Region bypass", kRegionLabels[app.settings.region]},
         {"Game language", kLanguageLabels[app.settings.language]},
     };
-    for (int i = 0; i < 5; ++i) {
-        SDL_Rect row = {120, 170 + i * 118, gfx::kWidth - 240, 94};
+    for (int i = 0; i < 8; ++i) {
+        SDL_Rect row = {120, 70 + i * 82, gfx::kWidth - 240, 64};
         app.gfx.fill(row, gfx::kCard);
         if (i == app.settings_cursor) app.gfx.frame(row, gfx::kCardFocus, 4);
-        app.gfx.text(rows[i].title, row.x + 40, row.y + 27,
+        app.gfx.text(rows[i].title, row.x + 40, row.y + 12,
                      gfx::FontSize::Body, gfx::kText);
         app.gfx.text(rows[i].value,
                      row.x + row.w - 40 -
                          app.gfx.text_width(rows[i].value,
                                             gfx::FontSize::Body),
-                     row.y + 27, gfx::FontSize::Body, gfx::kAccent);
+                     row.y + 12, gfx::FontSize::Body, gfx::kAccent);
     }
-    const char* note;
-    if (app.settings_cursor == 4)
-        note =
-            "Sets the streamed console's language. Applies to games that have "
-            "no in-game language menu; takes effect on the next launch.";
-    else if (app.settings.region != 0)
-        note =
+    const char* note_line_1;
+    const char* note_line_2 = nullptr;
+    if (app.settings_cursor == 7) {
+        note_line_1 =
+            "Sets the streamed console's language for games without a "
+            "language menu.";
+        note_line_2 = "The change takes effect the next time a game launches.";
+    } else if (app.settings_cursor == 1) {
+        note_line_1 =
+            "Low latency shows the newest frame immediately. Smooth keeps one "
+            "frame in reserve";
+        note_line_2 =
+            "for steadier motion, with about one source frame of added delay.";
+    } else if (app.settings_cursor == 2) {
+        note_line_1 =
+            "Medium is recommended. Sharpening restores brightness detail; "
+            "Off keeps the source image.";
+        note_line_2 =
+            "Strobe test cycles Off, Low, Medium, High and Extreme every 3 "
+            "seconds and labels each mode.";
+    } else if (app.settings_cursor == 3) {
+        note_line_1 =
+            "Medium is recommended. Contrast adds depth while protecting "
+            "black and white endpoints.";
+        note_line_2 =
+            "Strobe test cycles Off, Low, Medium and High every 3 seconds and "
+            "labels each mode.";
+    } else if (app.settings.region != 0) {
+        note_line_1 =
             "Region bypass spoofs your location to Xbox to reach xCloud from "
-            "an unsupported country. Use your own account at your own risk.";
-    else
-        note =
-            "Higher quality needs a stronger connection - 5 GHz Wi-Fi or "
-            "docked LAN recommended for 1080p high bitrate";
-    app.gfx.text_centered(note, gfx::kWidth / 2, 800, gfx::FontSize::Small,
-                          gfx::kTextDim);
+            "an unsupported country.";
+        note_line_2 = "Use your own account at your own risk.";
+    } else {
+        note_line_1 =
+            "Higher quality needs a stronger connection. Use 5 GHz Wi-Fi or "
+            "docked LAN";
+        note_line_2 = "for 1080p high bitrate.";
+    }
+    const int note_y = note_line_2 ? 775 : 800;
+    app.gfx.text_centered(note_line_1, gfx::kWidth / 2, note_y,
+                          gfx::FontSize::Small, gfx::kTextDim);
+    if (note_line_2)
+        app.gfx.text_centered(note_line_2, gfx::kWidth / 2, note_y + 34,
+                              gfx::FontSize::Small, gfx::kTextDim);
     draw_footer(app, "Left / Right  Change   B  Back");
 }
 
@@ -1035,7 +1081,9 @@ int main(int argc, char** argv) {
                     app.engine->start(
                         app.launch_game.title_id,
                         static_cast<QualityTier>(app.settings.quality),
-                        kLanguageCodes[app.settings.language]);
+                        kLanguageCodes[app.settings.language],
+                        static_cast<stream::VideoPacing>(app.settings.pacing),
+                        app.settings.sharpness, app.settings.contrast);
                     app.stream_hint_until = SDL_GetTicks() + 8000;
                     app.scene = Scene::Stream;
 #endif
@@ -1048,21 +1096,30 @@ int main(int argc, char** argv) {
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
-                    app.settings_cursor = std::min(4, app.settings_cursor + 1);
+                    app.settings_cursor = std::min(7, app.settings_cursor + 1);
                 int direction = (input.right ? 1 : 0) - (input.left ? 1 : 0);
                 if (direction != 0) {
                     if (app.settings_cursor == 0)
                         app.settings.quality =
                             (app.settings.quality + direction + 3) % 3;
                     else if (app.settings_cursor == 1)
+                        app.settings.pacing =
+                            (app.settings.pacing + direction + 2) % 2;
+                    else if (app.settings_cursor == 2)
+                        app.settings.sharpness =
+                            (app.settings.sharpness + direction + 6) % 6;
+                    else if (app.settings_cursor == 3)
+                        app.settings.contrast =
+                            (app.settings.contrast + direction + 5) % 5;
+                    else if (app.settings_cursor == 4)
                         app.settings.mapping =
                             (app.settings.mapping + direction + 2) % 2;
-                    else if (app.settings_cursor == 2)
+                    else if (app.settings_cursor == 5)
                         app.settings.vibration =
                             (app.settings.vibration + direction +
                              kVibrationLevels) %
                             kVibrationLevels;
-                    else if (app.settings_cursor == 3) {
+                    else if (app.settings_cursor == 6) {
                         app.settings.region =
                             (app.settings.region + direction + 6) % 6;
                         apply_region(app.settings);  // takes effect next request
@@ -1101,7 +1158,10 @@ int main(int argc, char** argv) {
                         app.engine->start(
                             app.launch_game.title_id,
                             static_cast<QualityTier>(app.settings.quality),
-                            kLanguageCodes[app.settings.language]);
+                            kLanguageCodes[app.settings.language],
+                            static_cast<stream::VideoPacing>(
+                                app.settings.pacing),
+                            app.settings.sharpness, app.settings.contrast);
                         app.stream_hint_until = SDL_GetTicks() + 8000;
                     }
                 } else if (input.b) {  // cancel while connecting

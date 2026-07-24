@@ -15,6 +15,9 @@ namespace gnx::stream {
 // Mirrors green-vita's SampleBuilder (32 late packets max).
 class AudioJitterBuffer {
 public:
+    // Start a new RTP sequence space. Required between xCloud sessions because
+    // the server chooses a fresh, unrelated initial sequence number.
+    void reset();
     // Add one arriving Opus payload tagged with its RTP sequence number.
     void push(uint16_t seq, const uint8_t* data, size_t size);
     // Move the next in-sequence packet into `out` if one is ready; returns

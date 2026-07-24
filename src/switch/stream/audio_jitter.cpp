@@ -11,6 +11,13 @@ namespace {
 constexpr size_t kMaxLate = 32;
 }  // namespace
 
+void AudioJitterBuffer::reset() {
+    pending_.clear();
+    next_seq_ = 0;
+    have_next_ = false;
+    lost_ = 0;
+}
+
 void AudioJitterBuffer::push(uint16_t seq, const uint8_t* data, size_t size) {
     if (!have_next_) {
         next_seq_ = seq;

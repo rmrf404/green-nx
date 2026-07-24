@@ -38,6 +38,8 @@ enum class EngineState {
     Stopped,
 };
 
+enum class VideoPacing { LowLatency = 0, Smooth = 1 };
+
 // Native xCloud streaming session: GSSV signaling + libpeer WebRTC +
 // NVDEC/SDL video + Opus audio + gamepad input channel.
 class Engine {
@@ -46,7 +48,9 @@ public:
     ~Engine();
 
     void start(const std::string& title_id, QualityTier tier,
-               const std::string& locale = "en-US");
+               const std::string& locale = "en-US",
+               VideoPacing pacing = VideoPacing::LowLatency,
+               int sharpness = 2, int contrast = 0);
     void stop();
 
     EngineState state() const { return state_; }
@@ -118,6 +122,9 @@ private:
     std::string title_id_;
     QualityTier tier_ = QualityTier::P1080HQ;
     std::string locale_ = "en-US";  // streamed console's system language
+    VideoPacing pacing_ = VideoPacing::LowLatency;
+    int sharpness_ = 2;
+    int contrast_ = 0;
 public:
     void log(const std::string& line);  // also used by the libpeer log sink
 
@@ -141,6 +148,7 @@ private:
     std::mutex video_mutex_;
     std::condition_variable video_cv_;  // wakes decode_loop when an AU arrives
     std::deque<std::vector<uint8_t>> video_queue_;
+    std::deque<Uint64> video_queue_times_;  // enqueue time matching each AU
     std::atomic<bool> got_frame_{false};
 
     // Decoded-frame handoff (Switch): decode_thread_ decodes into shared_frame_;
@@ -152,6 +160,48 @@ private:
     AVFrame* shared_frame_ = nullptr;   // latest decoded (decode thread writes)
     AVFrame* present_frame_ = nullptr;  // render thread's stable ref
     bool shared_frame_valid_ = false;
+    uint64_t shared_frame_seq_ = 0;     // protected by frame_mutex_
+    uint64_t last_present_seq_ = 0;     // render thread only
+    uint32_t present_hold_refreshes_ = 0;
+    struct SmoothFrame {
+        AVFrame* frame = nullptr;
+        uint64_t seq = 0;
+    };
+    std::deque<SmoothFrame> smooth_frames_;  // protected by frame_mutex_
+    bool smooth_have_present_ = false;
+    uint32_t smooth_refresh_phase_ = 0;
+    std::atomic<uint32_t> source_refresh_period_{1};  // 1=60fps, 2=30fps
+    uint32_t source_fast_streak_ = 0;  // decode thread only
+    uint32_t source_slow_streak_ = 0;  // decode thread only
+
+    // Diagnostic-only aggregate timings. These do not alter media behavior.
+    std::atomic<uint64_t> diag_decode_count_{0};
+    std::atomic<uint64_t> diag_decode_total_us_{0};
+    std::atomic<uint64_t> diag_decode_max_us_{0};
+    std::atomic<uint64_t> diag_handoff_total_us_{0};
+    std::atomic<uint64_t> diag_handoff_max_us_{0};
+    std::atomic<uint64_t> diag_queue_age_max_ms_{0};
+    std::atomic<uint64_t> diag_present_new_{0};
+    std::atomic<uint64_t> diag_present_repeat_{0};
+    std::atomic<uint64_t> diag_deadline_miss_{0};
+    std::atomic<uint64_t> diag_deadline_late_max_us_{0};
+    std::atomic<uint64_t> diag_last_decode_counter_{0};
+    std::atomic<uint64_t> diag_decode_gap_max_us_{0};
+
+    // Source and display cadence. Marker timing shows raw RTP delivery, AU
+    // timing shows completed jitter-buffer output, and hold buckets show how
+    // many display refreshes each decoded surface remained visible.
+    uint64_t diag_last_marker_counter_ = 0;  // worker thread only
+    uint64_t diag_last_au_counter_ = 0;      // worker thread only
+    std::atomic<uint64_t> diag_marker_lt25_{0}, diag_marker_25_40_{0};
+    std::atomic<uint64_t> diag_marker_40_55_{0}, diag_marker_55_75_{0};
+    std::atomic<uint64_t> diag_marker_gt75_{0}, diag_marker_gap_max_us_{0};
+    std::atomic<uint64_t> diag_au_lt25_{0}, diag_au_25_40_{0};
+    std::atomic<uint64_t> diag_au_40_55_{0}, diag_au_55_75_{0};
+    std::atomic<uint64_t> diag_au_gt75_{0}, diag_au_gap_max_us_{0};
+    std::atomic<uint64_t> diag_hold_1_{0}, diag_hold_2_{0};
+    std::atomic<uint64_t> diag_hold_3_{0}, diag_hold_4plus_{0};
+    std::atomic<uint64_t> diag_surface_skipped_{0};
 
     xcloud::InputSerializer input_;
     std::mutex input_mutex_;
@@ -163,8 +213,8 @@ private:
     bool rumble_pending_ = false;
     bool rumble_logged_ = false;  // peer thread only: log the first report once
     Uint64 stream_epoch_ = 0;
-    // Render-thread software vsync pacer for the deko3d present (see pump_video).
-    double next_present_ms_ = 0;
+    // High-resolution render deadline in SDL performance-counter ticks.
+    double next_present_counter_ = 0;
     std::atomic<Uint64> last_keyframe_req_{0};
     std::atomic<uint32_t> pli_sent_{0};  // RTCP PLI keyframe requests
 

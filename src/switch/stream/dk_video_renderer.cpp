@@ -1,9 +1,11 @@
 #include "dk_video_renderer.hpp"
 
+#include <SDL2/SDL.h>
 #include <switch.h>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 
@@ -34,6 +36,19 @@ struct Vertex {
     float uv[2];
 };
 
+uint64_t elapsed_us(std::chrono::steady_clock::time_point start) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start).count());
+}
+
+void update_max(std::atomic<uint64_t>& target, uint64_t value) {
+    uint64_t current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value,
+                                         std::memory_order_relaxed)) {}
+}
+
 // Fullscreen quad. deko3d clip space, UV top-left origin.
 constexpr Vertex kQuad[] = {
     {{-1.0f, +1.0f, 0.0f}, {0.0f, 0.0f}},
@@ -42,15 +57,17 @@ constexpr Vertex kQuad[] = {
     {{+1.0f, +1.0f, 0.0f}, {1.0f, 0.0f}},
 };
 
-// std140 layout for: mat3 yuvmat; vec3 offset; vec4 uv_data;
+// std140 video transform and image-enhancement controls.
 struct Transformation {
     alignas(16) float yuvmat_col0[4];
     alignas(16) float yuvmat_col1[4];
     alignas(16) float yuvmat_col2[4];
     alignas(16) float offset[4];
     alignas(16) float uv_data[4];
+    alignas(16) float sharp_data[4];
+    alignas(16) float contrast_data[4];
 };
-static_assert(sizeof(Transformation) == 80, "std140 Transformation");
+static_assert(sizeof(Transformation) == 112, "std140 Transformation");
 
 // Column-major YUV->RGB matrices (matching Moonlight-Switch / BT.xxx).
 const float kBt601Lim[9] = {1.1644f, 1.1644f, 1.1644f, 0.0f,    -0.3917f,
@@ -340,9 +357,23 @@ void DkVideoRenderer::update_transform(AVFrame* frame) {
     t.uv_data[1] = 0.0f;
     t.uv_data[2] = luma_w_ ? (float)frame_w_ / (float)luma_w_ : 1.0f;
     t.uv_data[3] = luma_h_ ? (float)frame_h_ / (float)luma_h_ : 1.0f;
+    static constexpr float kSharpness[5] = {0.0f, 0.60f, 1.20f, 2.0f, 3.0f};
+    static constexpr float kOvershoot[5] = {0.0f, 0.02f, 0.035f, 0.05f, 0.075f};
+    t.sharp_data[0] = kSharpness[effective_sharpness_];
+    t.sharp_data[1] = kOvershoot[effective_sharpness_];
+    t.sharp_data[2] = sharpness_ == 5
+                          ? static_cast<float>(effective_sharpness_ + 1) : 0.0f;
+    t.sharp_data[3] = static_cast<float>(fb_height_);
+    static constexpr float kContrast[4] = {0.0f, 0.18f, 0.34f, 0.55f};
+    t.contrast_data[0] = kContrast[effective_contrast_];
+    t.contrast_data[1] = contrast_ == 4
+                             ? static_cast<float>(effective_contrast_ + 1)
+                             : 0.0f;
     std::memcpy(static_cast<uint8_t*>(data_cpu_) + kUniformOff, &t, sizeof(t));
-    logf("deko3d: color space=%d full=%d crop=%.4fx%.4f", space, (int)full,
-         t.uv_data[2], t.uv_data[3]);
+    logf("deko3d: color space=%d full=%d crop=%.4fx%.4f sharp=%d%s contrast=%d%s", space,
+         (int)full, t.uv_data[2], t.uv_data[3], effective_sharpness_,
+         sharpness_ == 5 ? " (strobe)" : "", effective_contrast_,
+         contrast_ == 4 ? " (strobe)" : "");
 }
 
 DkVideoRenderer::FrameMapping* DkVideoRenderer::map_frame(AVFrame* frame,
@@ -396,6 +427,20 @@ DkVideoRenderer::FrameMapping* DkVideoRenderer::map_frame(AVFrame* frame,
 bool DkVideoRenderer::render(AVFrame* frame) {
     if (!initialized_) return false;
     maybe_rebuild_swapchain();  // follow dock/undock (720p <-> 1080p)
+    int active_sharpness =
+        sharpness_ == 5 ? static_cast<int>((SDL_GetTicks64() / 3000) % 5)
+                        : sharpness_;
+    if (active_sharpness != effective_sharpness_) {
+        effective_sharpness_ = active_sharpness;
+        transform_dirty_ = true;
+    }
+    int active_contrast =
+        contrast_ == 4 ? static_cast<int>((SDL_GetTicks64() / 3000) % 4)
+                       : contrast_;
+    if (active_contrast != effective_contrast_) {
+        effective_contrast_ = active_contrast;
+        transform_dirty_ = true;
+    }
     if (!swapchain_) return false;
     if (frame->format != AV_PIX_FMT_NVTEGRA) {
         if (!warned_not_hw_) {
@@ -444,7 +489,9 @@ bool DkVideoRenderer::render(AVFrame* frame) {
     FrameMapping* fm = map_frame(frame, base, handle, size);
     if (!fm) return false;
 
+    auto acquire_started = std::chrono::steady_clock::now();
     int slot = queue_.acquireImage(swapchain_);
+    uint64_t acquire_us = elapsed_us(acquire_started);
 
     cmdbuf_.clear();
     cmdbuf_.addMemory(cmd_memblock_, 0, kCmdSize);
@@ -500,9 +547,39 @@ bool DkVideoRenderer::render(AVFrame* frame) {
     cmdbuf_.draw(DkPrimitive_Quads, 4, 1, 0, 0);
 
     queue_.submitCommands(cmdbuf_.finishList());
+    auto present_started = std::chrono::steady_clock::now();
     queue_.presentImage(swapchain_, slot);
+    uint64_t present_us = elapsed_us(present_started);
+    auto idle_started = std::chrono::steady_clock::now();
     queue_.waitIdle();
+    uint64_t idle_us = elapsed_us(idle_started);
+
+    timing_renders_.fetch_add(1, std::memory_order_relaxed);
+    timing_acquire_total_us_.fetch_add(acquire_us, std::memory_order_relaxed);
+    timing_present_total_us_.fetch_add(present_us, std::memory_order_relaxed);
+    timing_idle_total_us_.fetch_add(idle_us, std::memory_order_relaxed);
+    update_max(timing_acquire_max_us_, acquire_us);
+    update_max(timing_present_max_us_, present_us);
+    update_max(timing_idle_max_us_, idle_us);
     return true;
+}
+
+DkVideoRenderer::TimingStats DkVideoRenderer::take_timing_stats() {
+    TimingStats stats;
+    stats.renders = timing_renders_.exchange(0, std::memory_order_relaxed);
+    stats.acquire_total_us =
+        timing_acquire_total_us_.exchange(0, std::memory_order_relaxed);
+    stats.acquire_max_us =
+        timing_acquire_max_us_.exchange(0, std::memory_order_relaxed);
+    stats.present_total_us =
+        timing_present_total_us_.exchange(0, std::memory_order_relaxed);
+    stats.present_max_us =
+        timing_present_max_us_.exchange(0, std::memory_order_relaxed);
+    stats.idle_total_us =
+        timing_idle_total_us_.exchange(0, std::memory_order_relaxed);
+    stats.idle_max_us =
+        timing_idle_max_us_.exchange(0, std::memory_order_relaxed);
+    return stats;
 }
 
 }  // namespace gnx::stream

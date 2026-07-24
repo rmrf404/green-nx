@@ -75,9 +75,34 @@ if [[ "${1:-}" == "--inside" ]]; then
 
   # 5) Link smoke test: catches unresolved symbols early.
   echo "=== smoke test link"
-  cat > /tmp/smoketest.c <<'EOF'
+cat > /tmp/smoketest.c <<'EOF'
+#include <stdarg.h>
+#include <stddef.h>
+#include <switch.h>
 #include <peer.h>
 #include <peer_connection.h>
+
+/* The application supplies these platform hooks in switch_compat.c. Keep
+ * minimal definitions in the archive smoke test so it tests the dependency
+ * link rather than failing on intentionally app-provided symbols. */
+struct ifaddrs;
+void peer_log(char* level, const char* file, int line, const char* fmt, ...) {
+  (void)level; (void)file; (void)line; (void)fmt;
+}
+int getifaddrs(struct ifaddrs** out) { (void)out; return -1; }
+void freeifaddrs(struct ifaddrs* list) { (void)list; }
+unsigned int if_nametoindex(const char* name) { (void)name; return 1; }
+char* if_indextoname(unsigned int index, char* name) {
+  (void)index; return name;
+}
+int mbedtls_hardware_poll(void* data, unsigned char* out, size_t len,
+                          size_t* olen) {
+  (void)data;
+  randomGet(out, len);
+  if (olen) *olen = len;
+  return 0;
+}
+
 int main(void) {
   peer_init();
   PeerConfiguration config = {0};
@@ -118,26 +143,31 @@ fi
 
 # 2) Apply patches (idempotent: skipped when already applied).
 apply_patch() {
-  local dir="$1" patch="$2"
-  if git -C "$dir" apply --reverse --check "$patch" >/dev/null 2>&1; then
+  local dir="$1" patch="$2"; shift 2
+  if git -C "$dir" apply "$@" --reverse --check "$patch" >/dev/null 2>&1; then
     echo "patch already applied: $(basename "$patch")"
   else
     echo "applying patch: $(basename "$patch")"
-    git -C "$dir" apply "$patch"
+    git -C "$dir" apply "$@" "$patch"
   fi
 }
-apply_patch "$LIBPEER_DIR" "$DEPS_DIR/patches/libpeer-switch.patch"
+# The patch was generated while these submodules had their own working-tree
+# changes, so its tail contains synthetic "<sha>-dirty" gitlink entries. Git
+# cannot apply those as object IDs; the real submodule changes are applied by
+# their dedicated patches immediately below.
+apply_patch "$LIBPEER_DIR" "$DEPS_DIR/patches/libpeer-switch.patch" \
+  --exclude=third_party/mbedtls --exclude=third_party/usrsctp
 apply_patch "$LIBPEER_DIR/third_party/mbedtls" "$DEPS_DIR/patches/mbedtls-switch.patch"
 apply_patch "$LIBPEER_DIR/third_party/usrsctp" "$DEPS_DIR/patches/usrsctp-switch.patch"
 
 # 3) Build everything inside the devkitPro container.
 rm -rf "$DEPS_DIR/switch"
-docker run --rm -v "$DEPS_DIR":/work/deps "$DOCKER_IMAGE" \
+MSYS_NO_PATHCONV=1 docker run --rm -v "$DEPS_DIR":/work/deps "$DOCKER_IMAGE" \
   bash /work/deps/build-switch.sh --inside
 
 # 4) Fix ownership of files the container may have created as root
 #    (no-op on Docker Desktop for Mac, needed on Linux hosts).
-docker run --rm -v "$DEPS_DIR":/work/deps "$DOCKER_IMAGE" \
+MSYS_NO_PATHCONV=1 docker run --rm -v "$DEPS_DIR":/work/deps "$DOCKER_IMAGE" \
   chown -R "$(id -u):$(id -g)" /work/deps/switch /work/deps/src >/dev/null 2>&1 || true
 
 # 5) Verify artifacts.

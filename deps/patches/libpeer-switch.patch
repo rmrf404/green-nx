@@ -271,7 +271,6 @@ index c763e80..47f677c 100644
 +          ntp_frac = ntohl(ntp_frac);
 +          pc->rtcp_last_sr_lsr = (ntp_sec << 16) | (ntp_frac >> 16);
 +          pc->rtcp_last_sr_time = ports_get_epoch_time();
-+          LOGI("RTCP SR received (lsr=%08x)", pc->rtcp_last_sr_lsr);
 +        }
 +        break;
 +      }

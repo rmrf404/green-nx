@@ -22,6 +22,36 @@ namespace {
 // libpeer's LOG_REDIRECT sink funnels through this single active engine.
 gnx::stream::Engine* g_log_engine = nullptr;
 
+void atomic_max(std::atomic<uint64_t>& target, uint64_t value) {
+    uint64_t current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value,
+                                         std::memory_order_relaxed)) {}
+}
+
+uint64_t counter_delta_us(uint64_t start, uint64_t end) {
+    uint64_t frequency = SDL_GetPerformanceFrequency();
+    return frequency && end >= start ? (end - start) * 1000000ull / frequency : 0;
+}
+
+void record_cadence(
+    uint64_t delta_us, std::atomic<uint64_t>& lt25,
+    std::atomic<uint64_t>& from25to40, std::atomic<uint64_t>& from40to55,
+    std::atomic<uint64_t>& from55to75, std::atomic<uint64_t>& gt75,
+    std::atomic<uint64_t>& maximum) {
+    if (delta_us < 25000)
+        lt25.fetch_add(1, std::memory_order_relaxed);
+    else if (delta_us < 40000)
+        from25to40.fetch_add(1, std::memory_order_relaxed);
+    else if (delta_us < 55000)
+        from40to55.fetch_add(1, std::memory_order_relaxed);
+    else if (delta_us < 75000)
+        from55to75.fetch_add(1, std::memory_order_relaxed);
+    else
+        gt75.fetch_add(1, std::memory_order_relaxed);
+    atomic_max(maximum, delta_us);
+}
+
 // Route ffmpeg's own diagnostics (H.264 reference errors, concealment, ...)
 // into stream-log; without this the decoder's complaints are invisible.
 void av_log_capture(void* avcl, int level, const char* fmt, va_list vl) {
@@ -106,24 +136,38 @@ void Engine::log(const std::string& line) {
     std::fprintf(log_file_, "[%8llu] %s\n",
                  static_cast<unsigned long long>(SDL_GetTicks64()),
                  line.c_str());
-    std::fflush(log_file_);
 }
 
 void Engine::start(const std::string& title_id, QualityTier tier,
-                   const std::string& locale) {
+                   const std::string& locale, VideoPacing pacing,
+                   int sharpness, int contrast) {
     stop();
     title_id_ = title_id;
     tier_ = tier;
     locale_ = locale;
+    pacing_ = pacing;
+    sharpness_ = std::clamp(sharpness, 0, 5);
+    contrast_ = std::clamp(contrast, 0, 4);
     {
         std::lock_guard<std::mutex> lock(log_mutex_);
         if (log_file_) std::fclose(log_file_);
 #ifdef __SWITCH__
         // Keep the previous session's log: rotate instead of overwrite.
-        std::remove("sdmc:/switch/green-nx/stream-log-prev.txt");
-        std::rename("sdmc:/switch/green-nx/stream-log.txt",
-                    "sdmc:/switch/green-nx/stream-log-prev.txt");
-        log_file_ = std::fopen("sdmc:/switch/green-nx/stream-log.txt", "w");
+        const char* mode = pacing_ == VideoPacing::Smooth
+                               ? "smooth" : "low-latency";
+        std::string current = std::string("sdmc:/switch/green-nx/stream-log-") +
+                              mode + ".txt";
+        std::string previous =
+            std::string("sdmc:/switch/green-nx/stream-log-") + mode +
+            "-prev.txt";
+        std::remove(previous.c_str());
+        std::rename(current.c_str(), previous.c_str());
+        log_file_ = std::fopen(current.c_str(), "w");
+        // Logging is diagnostic and must not stall the sole RTP socket pump.
+        // A synchronous fflush for the once-per-second audio line was enough
+        // to produce a small regular video hitch on SD cards. Keep the session
+        // in memory and let fclose() flush it on clean stream shutdown.
+        if (log_file_) std::setvbuf(log_file_, nullptr, _IOFBF, 256 * 1024);
 #else
         log_file_ = stderr;
 #endif
@@ -135,8 +179,16 @@ void Engine::start(const std::string& title_id, QualityTier tier,
     const char* tier_name = tier == QualityTier::P720      ? "720p/android"
                             : tier == QualityTier::P1080   ? "1080p/windows"
                                                            : "1080pHQ/tizen";
+    const char* pacing_name =
+        pacing_ == VideoPacing::Smooth ? "smooth" : "low-latency";
+    static const char* kSharpnessNames[] = {
+        "off", "low", "medium", "high", "extreme", "strobe"};
+    static const char* kContrastNames[] = {
+        "off", "low", "medium", "high", "strobe"};
     log("green-nx v" GNX_VERSION " | stream start: " + title_id + " | tier " +
-        tier_name);
+        tier_name + " | pacing " + pacing_name + " | sharpness " +
+        kSharpnessNames[sharpness_] + " | contrast " +
+        kContrastNames[contrast_]);
     quit_ = false;
     got_frame_ = false;
     channels_open_ = false;
@@ -144,7 +196,19 @@ void Engine::start(const std::string& title_id, QualityTier tier,
     pli_sent_ = 0;
     install_av_log_capture();
     jitter_.reset();
-    next_present_ms_ = 0;  // first frame presents immediately, then paced
+    next_present_counter_ = 0;  // first frame presents immediately, then paced
+#ifdef __SWITCH__
+    diag_last_marker_counter_ = 0;
+    diag_last_au_counter_ = 0;
+    shared_frame_seq_ = 0;
+    last_present_seq_ = 0;
+    present_hold_refreshes_ = 0;
+    smooth_have_present_ = false;
+    smooth_refresh_phase_ = 0;
+    source_refresh_period_ = 1;
+    source_fast_streak_ = source_slow_streak_ = 0;
+    smooth_frames_.clear();
+#endif
     state_ = EngineState::StartingSession;
     video_.init(renderer_);
     audio_.init();
@@ -189,6 +253,7 @@ void Engine::stop() {
     {
         std::lock_guard<std::mutex> lock(video_mutex_);
         video_queue_.clear();
+        video_queue_times_.clear();
     }
 #ifdef __SWITCH__
     {
@@ -197,6 +262,9 @@ void Engine::stop() {
         std::lock_guard<std::mutex> lock(frame_mutex_);
         if (shared_frame_) av_frame_free(&shared_frame_);
         if (present_frame_) av_frame_free(&present_frame_);
+        for (auto& queued : smooth_frames_)
+            if (queued.frame) av_frame_free(&queued.frame);
+        smooth_frames_.clear();
         shared_frame_valid_ = false;
     }
 #endif
@@ -234,15 +302,38 @@ void Engine::on_video(uint8_t* data, size_t size, void* user) {
     // held). `data` is a raw RTP packet; the jitter buffer reorders/assembles
     // complete access units and only emits clean, keyframe-anchored frames.
     auto* self = static_cast<Engine*>(user);
+    // RTP marker denotes the final packet of a source frame. Its arrival
+    // cadence is measured before jitter-buffer reassembly.
+    if (size >= 12 && (data[1] & 0x80u)) {
+        uint64_t arrived = SDL_GetPerformanceCounter();
+        if (self->diag_last_marker_counter_) {
+            record_cadence(
+                counter_delta_us(self->diag_last_marker_counter_, arrived),
+                self->diag_marker_lt25_, self->diag_marker_25_40_,
+                self->diag_marker_40_55_, self->diag_marker_55_75_,
+                self->diag_marker_gt75_, self->diag_marker_gap_max_us_);
+        }
+        self->diag_last_marker_counter_ = arrived;
+    }
     bool want_keyframe = false;
     self->jitter_.receive(
         data, size, SDL_GetTicks64(),
         [self](const uint8_t* au, size_t au_size) {
+            uint64_t emitted = SDL_GetPerformanceCounter();
+            if (self->diag_last_au_counter_) {
+                record_cadence(
+                    counter_delta_us(self->diag_last_au_counter_, emitted),
+                    self->diag_au_lt25_, self->diag_au_25_40_,
+                    self->diag_au_40_55_, self->diag_au_55_75_,
+                    self->diag_au_gt75_, self->diag_au_gap_max_us_);
+            }
+            self->diag_last_au_counter_ = emitted;
             {
                 std::lock_guard<std::mutex> lock(self->video_mutex_);
                 if (self->video_queue_.size() >= kMaxQueuedVideo)
-                    self->video_queue_.clear();
+                    self->video_queue_.clear(), self->video_queue_times_.clear();
                 self->video_queue_.emplace_back(au, au + au_size);
+                self->video_queue_times_.push_back(SDL_GetTicks64());
             }
             self->video_cv_.notify_one();  // wake the decode thread (Switch)
         },
@@ -580,7 +671,6 @@ void Engine::run_peer(GssvSession& session) {
         if (log_file_) {
             std::fprintf(log_file_, "----- OFFER -----\n%s\n----- ANSWER -----\n%s\n-----\n",
                          munged.c_str(), answer.c_str());
-            std::fflush(log_file_);
         }
     }
 
@@ -663,7 +753,6 @@ void Engine::run_peer(GssvSession& session) {
     }
     log("remote description set, checking connectivity");
 
-    Uint64 last_keepalive = SDL_GetTicks64();
     Uint64 last_rr = SDL_GetTicks64();
     Uint64 last_consent = SDL_GetTicks64();
     Uint64 last_audio_stats = SDL_GetTicks64();
@@ -676,6 +765,37 @@ void Engine::run_peer(GssvSession& session) {
     bool opened_channels = false;
     bool sent_handshake = false;
     PeerConnectionState last_logged_state = PEER_CONNECTION_NEW;
+
+    // GSSV keepalive is a blocking HTTPS request (with a timeout as high as
+    // 15 seconds). It must never run on this thread: this is also the sole
+    // libpeer socket pump, and pausing it lets the Switch's UDP receive queue
+    // overflow. In practice that produced a video/audio hitch followed by a
+    // PLI almost exactly every 15 seconds. Once signaling is complete, this
+    // helper is the only thread that uses `session`/its Http instance.
+    std::atomic<bool> keepalive_stop{false};
+    std::thread keepalive_thread([this, &session, &keepalive_stop] {
+        Uint64 next = SDL_GetTicks64() + 15000;
+        while (!quit_ && !keepalive_stop) {
+            Uint64 now = SDL_GetTicks64();
+            if (now < next) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(
+                    std::min<Uint64>(100, next - now)));
+                continue;
+            }
+            Uint64 started = now;
+            try {
+                session.keepalive();
+            } catch (const std::exception& error) {
+                if (!quit_ && !keepalive_stop)
+                    log(std::string("keepalive failed: ") + error.what());
+            }
+            Uint64 elapsed = SDL_GetTicks64() - started;
+            if (elapsed >= 100)
+                log("keepalive took " + std::to_string(elapsed) +
+                    "ms (off media thread)");
+            next = SDL_GetTicks64() + 15000;
+        }
+    });
 
     while (!quit_) {
         // Drain all packets ready on the socket this cycle. Video at 1080p is
@@ -718,12 +838,12 @@ void Engine::run_peer(GssvSession& session) {
 
         if (peer_state_ == PEER_CONNECTION_FAILED) {
             fail("WebRTC connection failed");
-            return;
+            break;
         }
         if (state_ == EngineState::Negotiating &&
             SDL_GetTicks64() - negotiation_started > 45000) {
             fail("Connection timed out");
-            return;
+            break;
         }
 
         // Until the first frame decodes, keep asking for a keyframe. xCloud may
@@ -784,6 +904,12 @@ void Engine::run_peer(GssvSession& session) {
             prev_audio_time = now;
             last_audio_stats = now;
             if (got_frame_) {
+                auto v = jitter_.stats();
+                size_t video_q = 0;
+                {
+                    std::lock_guard<std::mutex> lock(video_mutex_);
+                    video_q = video_queue_.size();
+                }
                 log("audio| rx=" + std::to_string(a.received) +
                     " play=" + std::to_string(a.played) +
                     " fail=" + std::to_string(a.failed) +
@@ -796,6 +922,77 @@ void Engine::run_peer(GssvSession& session) {
                     " dev=" + std::to_string(audio_.device_hz()) + "hz" +
                     " ema=" + std::to_string(a.ema_ms) + "ms" +
                     " adj=" + std::to_string(a.adj_ppm) + "ppm");
+                log("video| pkt=" + std::to_string(v.packets) +
+                    " frame=" + std::to_string(v.frames) +
+                    " lostfrm=" + std::to_string(v.dropped) +
+                    " nack=" + std::to_string(v.nacks) +
+                    " resync=" + std::to_string(v.resyncs) +
+                    " bytes=" + std::to_string(v.last_frame_bytes) +
+                    " q=" + std::to_string(video_q));
+#ifdef __SWITCH__
+                auto dk = dk_video_.take_timing_stats();
+                uint64_t dec_count =
+                    diag_decode_count_.exchange(0, std::memory_order_relaxed);
+                uint64_t dec_total =
+                    diag_decode_total_us_.exchange(0, std::memory_order_relaxed);
+                uint64_t handoff_total =
+                    diag_handoff_total_us_.exchange(0, std::memory_order_relaxed);
+                auto average = [](uint64_t total, uint64_t count) {
+                    return count ? total / count : 0;
+                };
+                log("timing| dec=" + std::to_string(dec_count) +
+                    " avg=" + std::to_string(average(dec_total, dec_count)) +
+                    "us max=" + std::to_string(
+                        diag_decode_max_us_.exchange(0, std::memory_order_relaxed)) +
+                    "us gapmax=" + std::to_string(
+                        diag_decode_gap_max_us_.exchange(0, std::memory_order_relaxed)) +
+                    "us qage=" + std::to_string(
+                        diag_queue_age_max_ms_.exchange(0, std::memory_order_relaxed)) +
+                    "ms lockavg=" +
+                    std::to_string(average(handoff_total, dec_count)) +
+                    "us lockmax=" + std::to_string(
+                        diag_handoff_max_us_.exchange(0, std::memory_order_relaxed)) +
+                    "us render=" + std::to_string(dk.renders) +
+                    " new=" + std::to_string(
+                        diag_present_new_.exchange(0, std::memory_order_relaxed)) +
+                    " repeat=" + std::to_string(
+                        diag_present_repeat_.exchange(0, std::memory_order_relaxed)) +
+                    " miss=" + std::to_string(
+                        diag_deadline_miss_.exchange(0, std::memory_order_relaxed)) +
+                    " late=" + std::to_string(
+                        diag_deadline_late_max_us_.exchange(
+                            0, std::memory_order_relaxed)) +
+                    "us acq=" + std::to_string(average(
+                        dk.acquire_total_us, dk.renders)) +
+                    "/" + std::to_string(dk.acquire_max_us) +
+                    "us present=" + std::to_string(average(
+                        dk.present_total_us, dk.renders)) +
+                    "/" + std::to_string(dk.present_max_us) +
+                    "us idle=" + std::to_string(average(
+                        dk.idle_total_us, dk.renders)) +
+                    "/" + std::to_string(dk.idle_max_us) + "us");
+                log("cadence| mark=" +
+                    std::to_string(diag_marker_lt25_.exchange(0)) + "/" +
+                    std::to_string(diag_marker_25_40_.exchange(0)) + "/" +
+                    std::to_string(diag_marker_40_55_.exchange(0)) + "/" +
+                    std::to_string(diag_marker_55_75_.exchange(0)) + "/" +
+                    std::to_string(diag_marker_gt75_.exchange(0)) +
+                    " max=" +
+                    std::to_string(diag_marker_gap_max_us_.exchange(0)) +
+                    "us au=" + std::to_string(diag_au_lt25_.exchange(0)) +
+                    "/" + std::to_string(diag_au_25_40_.exchange(0)) +
+                    "/" + std::to_string(diag_au_40_55_.exchange(0)) +
+                    "/" + std::to_string(diag_au_55_75_.exchange(0)) +
+                    "/" + std::to_string(diag_au_gt75_.exchange(0)) +
+                    " max=" + std::to_string(
+                        diag_au_gap_max_us_.exchange(0)) +
+                    "us hold=" + std::to_string(diag_hold_1_.exchange(0)) +
+                    "/" + std::to_string(diag_hold_2_.exchange(0)) +
+                    "/" + std::to_string(diag_hold_3_.exchange(0)) +
+                    "/" + std::to_string(diag_hold_4plus_.exchange(0)) +
+                    " skip=" + std::to_string(
+                        diag_surface_skipped_.exchange(0)));
+#endif
             }
         }
 
@@ -807,18 +1004,14 @@ void Engine::run_peer(GssvSession& session) {
             if (peer_) peer_connection_send_consent(peer_);
         }
 
-        if (now - last_keepalive > 15000) {
-            last_keepalive = now;
-            try {
-                session.keepalive();
-            } catch (const std::exception&) {}
-        }
-
         // Only yield when idle. While video is flowing we loop right back and
         // keep draining at full speed (the select() inside paces idle cycles).
         if (!drained_any)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+
+    keepalive_stop = true;
+    if (keepalive_thread.joinable()) keepalive_thread.join();
 }
 
 // ---- render-thread interface ----------------------------------------------
@@ -834,6 +1027,7 @@ void Engine::run_peer(GssvSession& session) {
 void Engine::decode_loop() {
     while (!quit_) {
         std::vector<uint8_t> unit;
+        Uint64 enqueued_at = 0;
         {
             std::unique_lock<std::mutex> lock(video_mutex_);
             video_cv_.wait_for(lock, std::chrono::milliseconds(20), [this] {
@@ -843,13 +1037,63 @@ void Engine::decode_loop() {
             if (video_queue_.empty()) continue;
             unit = std::move(video_queue_.front());
             video_queue_.pop_front();
+            if (!video_queue_times_.empty()) {
+                enqueued_at = video_queue_times_.front();
+                video_queue_times_.pop_front();
+            }
         }
+        if (enqueued_at)
+            atomic_max(diag_queue_age_max_ms_, SDL_GetTicks64() - enqueued_at);
+        uint64_t decode_started = SDL_GetPerformanceCounter();
         if (video_.decode(unit.data(), unit.size())) {
+            uint64_t decoded_at = SDL_GetPerformanceCounter();
+            uint64_t decode_us = counter_delta_us(decode_started, decoded_at);
+            diag_decode_count_.fetch_add(1, std::memory_order_relaxed);
+            diag_decode_total_us_.fetch_add(decode_us, std::memory_order_relaxed);
+            atomic_max(diag_decode_max_us_, decode_us);
+            uint64_t previous =
+                diag_last_decode_counter_.exchange(decoded_at,
+                                                   std::memory_order_relaxed);
+            if (previous) {
+                uint64_t gap_us = counter_delta_us(previous, decoded_at);
+                atomic_max(diag_decode_gap_max_us_,
+                           gap_us);
+                if (gap_us < 25000) {
+                    ++source_fast_streak_;
+                    source_slow_streak_ = 0;
+                    if (source_fast_streak_ >= 8) source_refresh_period_ = 1;
+                } else if (gap_us < 55000) {
+                    ++source_slow_streak_;
+                    source_fast_streak_ = 0;
+                    if (source_slow_streak_ >= 8) source_refresh_period_ = 2;
+                }
+            }
+            uint64_t handoff_started = SDL_GetPerformanceCounter();
             {
                 std::lock_guard<std::mutex> lock(frame_mutex_);
-                av_frame_unref(shared_frame_);
-                av_frame_ref(shared_frame_, video_.current_frame());
-                shared_frame_valid_ = true;
+                uint64_t locked_at = SDL_GetPerformanceCounter();
+                uint64_t handoff_us =
+                    counter_delta_us(handoff_started, locked_at);
+                diag_handoff_total_us_.fetch_add(handoff_us,
+                                                 std::memory_order_relaxed);
+                atomic_max(diag_handoff_max_us_, handoff_us);
+                ++shared_frame_seq_;
+                if (pacing_ == VideoPacing::Smooth) {
+                    AVFrame* queued = av_frame_clone(video_.current_frame());
+                    if (queued) smooth_frames_.push_back({queued, shared_frame_seq_});
+                    // Bound latency and NVTEGRA surface retention.
+                    while (smooth_frames_.size() > 4) {
+                        auto stale = smooth_frames_.front();
+                        smooth_frames_.pop_front();
+                        if (stale.frame) av_frame_free(&stale.frame);
+                        diag_surface_skipped_.fetch_add(1,
+                                                       std::memory_order_relaxed);
+                    }
+                } else {
+                    av_frame_unref(shared_frame_);
+                    av_frame_ref(shared_frame_, video_.current_frame());
+                    shared_frame_valid_ = true;
+                }
             }
             if (!got_frame_) {
                 got_frame_ = true;
@@ -874,25 +1118,89 @@ SDL_Texture* Engine::pump_video() {
     //    keeps a static / low-fps scene (e.g. a "syncing save" screen where
     //    xCloud nearly stops sending) from decaying to an empty surface -- which
     //    the YUV->RGB shader turns bright green.
-    // The rate is a hair UNDER 60 Hz on purpose: deko3d aborts (acquireImage ->
+    // Match the Switch display's NTSC-derived refresh. The old SDL_GetTicks64
+    // pacer quantized deadlines to whole milliseconds (uneven 16/17 ms spacing)
+    // and used 59.9 Hz, guaranteeing periodic repeats against a 60 fps stream.
+    // SDL's performance counter preserves the fractional deadline.
+    // The rate stays just under 60 Hz: deko3d aborts (acquireImage ->
     // DkResult_Fail) if we queue frames faster than the compositor drains them.
     // We take our OWN ref of the shared frame so the decode thread can keep
     // producing without recycling the surface the GPU is still sampling.
-    constexpr double kPresentIntervalMs = 1000.0 / 59.9;  // ~16.69 ms
-    double now = static_cast<double>(SDL_GetTicks64());
-    if (dk_video_.initialized() && got_frame_ && now >= next_present_ms_) {
+    constexpr double kDisplayHz = 59.94;
+    const double interval =
+        static_cast<double>(SDL_GetPerformanceFrequency()) / kDisplayHz;
+    double now = static_cast<double>(SDL_GetPerformanceCounter());
+    if (dk_video_.initialized() && got_frame_ &&
+        now >= next_present_counter_) {
         AVFrame* frame = nullptr;
+        uint64_t frame_seq = 0;
         {
             std::lock_guard<std::mutex> lock(frame_mutex_);
-            if (shared_frame_valid_) {
+            if (pacing_ == VideoPacing::Smooth) {
+                uint32_t period =
+                    source_refresh_period_.load(std::memory_order_relaxed);
+                bool due = !smooth_have_present_ ||
+                           ++smooth_refresh_phase_ >= period;
+                // Keep one decoded frame in reserve to absorb arrival jitter.
+                if (due && smooth_frames_.size() >= 2) {
+                    SmoothFrame next = smooth_frames_.front();
+                    smooth_frames_.pop_front();
+                    av_frame_unref(present_frame_);
+                    av_frame_move_ref(present_frame_, next.frame);
+                    av_frame_free(&next.frame);
+                    frame_seq = next.seq;
+                    smooth_have_present_ = true;
+                    smooth_refresh_phase_ = 0;
+                } else if (smooth_have_present_) {
+                    frame_seq = last_present_seq_;
+                }
+                if (smooth_have_present_) frame = present_frame_;
+            } else if (shared_frame_valid_) {
                 av_frame_unref(present_frame_);
                 if (av_frame_ref(present_frame_, shared_frame_) == 0)
                     frame = present_frame_;
+                frame_seq = shared_frame_seq_;
             }
         }
-        if (frame) dk_video_.render(frame);
-        next_present_ms_ += kPresentIntervalMs;
-        if (next_present_ms_ < now) next_present_ms_ = now + kPresentIntervalMs;
+        if (frame) {
+            if (frame_seq != last_present_seq_) {
+                diag_present_new_.fetch_add(1, std::memory_order_relaxed);
+                if (last_present_seq_) {
+                    if (present_hold_refreshes_ == 1)
+                        diag_hold_1_.fetch_add(1, std::memory_order_relaxed);
+                    else if (present_hold_refreshes_ == 2)
+                        diag_hold_2_.fetch_add(1, std::memory_order_relaxed);
+                    else if (present_hold_refreshes_ == 3)
+                        diag_hold_3_.fetch_add(1, std::memory_order_relaxed);
+                    else if (present_hold_refreshes_ >= 4)
+                        diag_hold_4plus_.fetch_add(1,
+                                                  std::memory_order_relaxed);
+                    if (frame_seq > last_present_seq_ + 1)
+                        diag_surface_skipped_.fetch_add(
+                            frame_seq - last_present_seq_ - 1,
+                            std::memory_order_relaxed);
+                }
+                last_present_seq_ = frame_seq;
+                present_hold_refreshes_ = 1;
+            } else {
+                diag_present_repeat_.fetch_add(1, std::memory_order_relaxed);
+                ++present_hold_refreshes_;
+            }
+            double lateness = now - next_present_counter_;
+            if (lateness >= interval) {
+                diag_deadline_miss_.fetch_add(1, std::memory_order_relaxed);
+                uint64_t frequency = SDL_GetPerformanceFrequency();
+                uint64_t late_us = frequency
+                    ? static_cast<uint64_t>(lateness * 1000000.0 /
+                                            static_cast<double>(frequency))
+                    : 0;
+                atomic_max(diag_deadline_late_max_us_, late_us);
+            }
+            dk_video_.render(frame);
+        }
+        next_present_counter_ += interval;
+        if (next_present_counter_ < now)
+            next_present_counter_ = now + interval;
     }
     return nullptr;
 #else
@@ -905,6 +1213,7 @@ SDL_Texture* Engine::pump_video() {
             if (video_queue_.empty()) break;
             unit = std::move(video_queue_.front());
             video_queue_.pop_front();
+            if (!video_queue_times_.empty()) video_queue_times_.pop_front();
         }
         if (video_.decode(unit.data(), unit.size()) && !got_frame_) {
             got_frame_ = true;
@@ -919,6 +1228,8 @@ SDL_Texture* Engine::pump_video() {
 bool Engine::begin_deko_output() {
 #ifdef __SWITCH__
     dk_video_.set_logger([this](const char* m) { log(std::string(m)); });
+    dk_video_.set_sharpness(sharpness_);
+    dk_video_.set_contrast(contrast_);
     bool ok = dk_video_.init();
     log(ok ? "deko3d output started" : "deko3d output FAILED to start");
     return ok;

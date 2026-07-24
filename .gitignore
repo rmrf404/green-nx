@@ -24,3 +24,7 @@ references/
 
 # Store-submission assets (kept local)
 promo/
+
+# Local safety snapshots (never include in release PRs)
+v2_safe/
+v1.0.19_safe/
