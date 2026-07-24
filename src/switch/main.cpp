@@ -144,7 +144,7 @@ struct Settings {
     int source = 0;     // 0=ask every time, 1=xCloud, 2=your Xbox
     float volume = 1.0f;  // output gain for streamed audio (0.5-4.0); tune in settings.json
     // Smooth video pacing: steadier motion for about one source frame of
-    // extra latency. No UI row yet -- flip "smooth" in settings.json.
+    // extra latency ("Video pacing" row / "smooth" in settings.json).
     bool smooth = false;
 };
 
@@ -1233,6 +1233,7 @@ void draw_settings(App& app) {
         {"Game language", kLanguageLabels[app.settings.language]},
         {"Volume",
          std::to_string(static_cast<int>(app.settings.volume * 100 + 0.5f)) + "%"},
+        {"Video pacing", app.settings.smooth ? "Smooth" : "Standard"},
     };
     if (!app.consoles.empty())
         rows.push_back({"Preferred source",
@@ -1245,14 +1246,27 @@ void draw_settings(App& app) {
     rows.push_back({"Sign out", app.signout_armed
                                     ? "Press A again to confirm"
                                     : app.gamertag});
-    // The list must clear the note box at y=820. The Volume row can push it to
-    // 8 rows (console linked + volume + sign out), so the pitch tightens (and
-    // the rows shrink to match, so they never overlap) past 7. Up to 7 keeps the
-    // original 108/92 look.
-    int pitch = rows.size() <= 6 ? 108 : rows.size() <= 7 ? 92 : 78;
-    int row_h = rows.size() <= 7 ? 96 : 70;
-    for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
-        SDL_Rect row = {120, 170 + i * pitch, gfx::kWidth - 240, row_h};
+    // The list must clear the note box at y=820, which fits 8 rows at the
+    // tightened 78/70 pitch. A linked console now makes 9 (volume + pacing +
+    // source + sign out), so instead of shrinking rows a third time the list
+    // scrolls: an 8-row window slides only when the cursor crosses its edge,
+    // and dots mark hidden rows. Up to 7 rows keeps the original 108/92 look.
+    constexpr int kVisibleRows = 8;
+    int shown = std::min(static_cast<int>(rows.size()), kVisibleRows);
+    int first = std::clamp(app.settings_cursor - (kVisibleRows - 1), 0,
+                           static_cast<int>(rows.size()) - shown);
+    int pitch = shown <= 6 ? 108 : shown <= 7 ? 92 : 78;
+    int row_h = shown <= 7 ? 96 : 70;
+    if (first > 0)
+        app.gfx.text("· · ·", 120 + (gfx::kWidth - 240) / 2 - 24, 140,
+                     gfx::FontSize::Small, gfx::kFaint);
+    if (first + shown < static_cast<int>(rows.size()))
+        app.gfx.text("· · ·", 120 + (gfx::kWidth - 240) / 2 - 24,
+                     170 + (shown - 1) * pitch + row_h + 4,
+                     gfx::FontSize::Small, gfx::kFaint);
+    for (int i = first; i < first + shown; ++i) {
+        SDL_Rect row = {120, 170 + (i - first) * pitch, gfx::kWidth - 240,
+                        row_h};
         bool focused = i == app.settings_cursor;
         // Row-focus variant (card 1g): wide elements don't scale — surface
         // lift + 10px side bar + 4px border + one glow frame instead.
@@ -1302,6 +1316,10 @@ void draw_settings(App& app) {
             line2 = "sounds quiet even with the console at full volume.";
             break;
         case 6:
+            line1 = "Smooth evens motion out by holding one frame in reserve —";
+            line2 = "steadier 30 fps scenes for about one frame of extra lag.";
+            break;
+        case 7:
             line1 = "Where Play launches games: xCloud (cloud servers) or";
             line2 = "remote play from your own console over your network.";
             break;
@@ -2109,9 +2127,9 @@ int main(int argc, char** argv) {
             }
 
             case Scene::Settings: {
-                // +1 vs upstream: the Volume row sits before "Preferred source"
-                // and "Sign out", pushing the last row down by one.
-                int signout_row = app.consoles.empty() ? 6 : 7;
+                // Row order: quality, mapping, vibration, region, language,
+                // volume, pacing, [source when a console is linked], sign out.
+                int signout_row = app.consoles.empty() ? 7 : 8;
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
@@ -2159,6 +2177,8 @@ int main(int argc, char** argv) {
                     else if (app.settings_cursor == 5)
                         app.settings.volume = std::clamp(
                             app.settings.volume + direction * 0.5f, 0.5f, 4.0f);
+                    else if (app.settings_cursor == 6)
+                        app.settings.smooth = !app.settings.smooth;
                     else
                         app.settings.source =
                             (app.settings.source + direction + 3) % 3;
