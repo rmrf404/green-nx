@@ -142,7 +142,7 @@ struct Settings {
     int region = 0;     // region-bypass IP: 0=Off, else index into kRegion*
     int language = 0;   // index into kLanguage* (0 = English US)
     int source = 0;     // 0=ask every time, 1=xCloud, 2=your Xbox
-    float volume = 2.0f;  // output gain for streamed audio (0.5-4.0); tune in settings.json
+    float volume = 1.0f;  // output gain for streamed audio (0.5-4.0); tune in settings.json
 };
 
 constexpr int kLanguageCount = 14;
@@ -275,7 +275,7 @@ Settings load_settings() {
     settings.language =
         std::clamp(data.value("language", 0), 0, kLanguageCount - 1);
     settings.source = std::clamp(data.value("source", 0), 0, 2);
-    settings.volume = std::clamp(data.value("volume", 2.0f), 0.5f, 4.0f);
+    settings.volume = std::clamp(data.value("volume", 1.0f), 0.5f, 4.0f);
     return settings;
 }
 
