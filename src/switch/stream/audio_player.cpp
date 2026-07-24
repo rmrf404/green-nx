@@ -50,6 +50,17 @@ bool AudioPlayer::init() {
     resample_pos_ = 0.0f;
     carry_[0] = carry_[1] = 0;
 
+    // AudioPlayer is reused across streams, so clear the per-session reorder
+    // buffer, inbox and counters. The reorder reset is the important one: a
+    // stale next_seq_ from the previous stream makes the RFC1982 "too late"
+    // check drop the whole new stream (intermittent no-audio until reconnect).
+    reorder_.reset();
+    inbox_.clear();
+    received_ = played_ = failed_ = lost_ = 0;
+    underruns_ = dropped_samples_ = frames_ = out_samples_ = 0;
+    adj_ppm_ = 0;
+    ema_ms_ = 0;
+
     if (R_FAILED(audoutInitialize())) return false;
     audout_up_ = true;
     if (R_FAILED(audoutStartAudioOut())) return false;
