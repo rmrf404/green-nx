@@ -38,6 +38,14 @@ enum class EngineState {
     Stopped,
 };
 
+// How decoded frames reach the display (Switch deko3d path).
+//   Steady: present the NEWEST decoded frame on the ~60 Hz software clock --
+//           lowest latency, but uneven arrival timing shows as motion hitches.
+//   Smooth: keep one decoded frame in reserve and present in source order on
+//           a detected 30/60 Hz cadence -- steadier motion at the cost of
+//           about one source frame (~33 ms at 30 fps) of extra latency.
+enum class VideoPacing { Steady = 0, Smooth = 1 };
+
 // Native xCloud streaming session: GSSV signaling + libpeer WebRTC +
 // NVDEC/SDL video + Opus audio + gamepad input channel.
 class Engine {
@@ -56,6 +64,10 @@ public:
     // Output gain applied to decoded audio (forwarded to the AudioPlayer). Set
     // from the "volume" setting before each stream start; 1.0 = unchanged.
     void set_audio_gain(float gain) { audio_gain_ = gain; }
+
+    // Video pacing mode (see VideoPacing). Set from the "smooth" setting
+    // before each stream start; default Steady.
+    void set_pacing(VideoPacing pacing) { pacing_ = pacing; }
 
     EngineState state() const { return state_; }
     std::string status() const;
@@ -134,6 +146,7 @@ private:
     QualityTier tier_ = QualityTier::P1080HQ;
     std::string locale_ = "en-US";  // streamed console's system language
     float audio_gain_ = 1.0f;       // forwarded to AudioPlayer::set_gain
+    VideoPacing pacing_ = VideoPacing::Steady;  // set before start()
 public:
     void log(const std::string& line);  // also used by the libpeer log sink
 
@@ -168,6 +181,34 @@ private:
     AVFrame* shared_frame_ = nullptr;   // latest decoded (decode thread writes)
     AVFrame* present_frame_ = nullptr;  // render thread's stable ref
     bool shared_frame_valid_ = false;
+    uint64_t shared_frame_seq_ = 0;     // protected by frame_mutex_
+
+    // Smooth pacing (VideoPacing::Smooth): decoded frames queue in source
+    // order instead of newest-wins; pump_video presents them on a detected
+    // 30/60 Hz cadence with one frame held in reserve to absorb arrival
+    // jitter. The queue is capped hard: each entry pins an NVTEGRA surface
+    // from the decoder's small pool, so letting it grow would starve NVDEC.
+    struct SmoothFrame {
+        AVFrame* frame = nullptr;
+        uint64_t seq = 0;
+    };
+    std::deque<SmoothFrame> smooth_frames_;  // protected by frame_mutex_
+    bool smooth_have_present_ = false;       // render thread only
+    uint32_t smooth_refresh_phase_ = 0;      // render thread only
+    std::atomic<uint32_t> source_refresh_period_{1};  // 1=60fps, 2=30fps
+    uint32_t source_fast_streak_ = 0;  // decode thread only
+    uint32_t source_slow_streak_ = 0;  // decode thread only
+    Uint64 last_decode_ticks_ = 0;     // decode thread only
+
+    // Pacing telemetry, logged once per second from run_peer (pace| line):
+    // new/repeated presents, how many refreshes each frame stayed up, and
+    // frames skipped (newest-wins jumps or smooth-queue overflow drops).
+    uint64_t last_present_seq_ = 0;        // render thread only
+    uint32_t present_hold_refreshes_ = 0;  // render thread only
+    std::atomic<uint32_t> pace_new_{0}, pace_repeat_{0};
+    std::atomic<uint32_t> pace_hold1_{0}, pace_hold2_{0};
+    std::atomic<uint32_t> pace_hold3_{0}, pace_hold4p_{0};
+    std::atomic<uint32_t> pace_skip_{0};
 
     xcloud::InputSerializer input_;
     std::mutex input_mutex_;
@@ -179,8 +220,10 @@ private:
     bool rumble_pending_ = false;
     bool rumble_logged_ = false;  // peer thread only: log the first report once
     Uint64 stream_epoch_ = 0;
-    // Render-thread software vsync pacer for the deko3d present (see pump_video).
-    double next_present_ms_ = 0;
+    // Render-thread software vsync pacer for the deko3d present (see
+    // pump_video), in SDL performance-counter ticks: millisecond deadlines
+    // quantized to an uneven 16/17 ms grid; the counter keeps the fraction.
+    double next_present_counter_ = 0;
     std::atomic<Uint64> last_keyframe_req_{0};
     std::atomic<uint32_t> pli_sent_{0};  // RTCP PLI keyframe requests
 

@@ -143,6 +143,9 @@ struct Settings {
     int language = 0;   // index into kLanguage* (0 = English US)
     int source = 0;     // 0=ask every time, 1=xCloud, 2=your Xbox
     float volume = 1.0f;  // output gain for streamed audio (0.5-4.0); tune in settings.json
+    // Smooth video pacing: steadier motion for about one source frame of
+    // extra latency. No UI row yet -- flip "smooth" in settings.json.
+    bool smooth = false;
 };
 
 constexpr int kLanguageCount = 14;
@@ -276,6 +279,7 @@ Settings load_settings() {
         std::clamp(data.value("language", 0), 0, kLanguageCount - 1);
     settings.source = std::clamp(data.value("source", 0), 0, 2);
     settings.volume = std::clamp(data.value("volume", 1.0f), 0.5f, 4.0f);
+    settings.smooth = data.value("smooth", false);
     return settings;
 }
 
@@ -287,7 +291,8 @@ void save_settings(const Settings& settings) {
                 {"region", settings.region},
                 {"language", settings.language},
                 {"source", settings.source},
-                {"volume", settings.volume}}.dump(2);
+                {"volume", settings.volume},
+                {"smooth", settings.smooth}}.dump(2);
 }
 
 // Streamed console's system language (BCP-47). Games without an in-game
@@ -848,6 +853,8 @@ void launch_stream(App& app, bool home) {
     QualityTier tier = static_cast<QualityTier>(app.settings.quality);
     const char* locale = kLanguageCodes[app.settings.language];
     app.engine->set_audio_gain(app.settings.volume);
+    app.engine->set_pacing(app.settings.smooth ? stream::VideoPacing::Smooth
+                                               : stream::VideoPacing::Steady);
     if (app.launching_home)
         app.engine->start_home(selected_console(app).server_id, tier, locale);
     else

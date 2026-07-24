@@ -153,7 +153,8 @@ void Engine::start_common(const std::string& title_id, QualityTier tier,
                             : tier == QualityTier::P1080   ? "1080p/windows"
                                                            : "1080pHQ/tizen";
     log("green-nx v" GNX_VERSION " | stream start: " + title_id + " | tier " +
-        tier_name);
+        tier_name +
+        (pacing_ == VideoPacing::Smooth ? " | pacing smooth" : ""));
     quit_ = false;
     got_frame_ = false;
     channels_open_ = false;
@@ -161,7 +162,7 @@ void Engine::start_common(const std::string& title_id, QualityTier tier,
     pli_sent_ = 0;
     install_av_log_capture();
     jitter_.reset();
-    next_present_ms_ = 0;  // first frame presents immediately, then paced
+    next_present_counter_ = 0;  // first frame presents immediately, then paced
     state_ = EngineState::StartingSession;
     video_.init(renderer_);
     audio_.init();
@@ -170,6 +171,17 @@ void Engine::start_common(const std::string& title_id, QualityTier tier,
     shared_frame_ = av_frame_alloc();
     present_frame_ = av_frame_alloc();
     shared_frame_valid_ = false;
+    shared_frame_seq_ = 0;
+    last_present_seq_ = 0;
+    present_hold_refreshes_ = 0;
+    smooth_have_present_ = false;
+    smooth_refresh_phase_ = 0;
+    source_refresh_period_ = 1;
+    source_fast_streak_ = source_slow_streak_ = 0;
+    last_decode_ticks_ = 0;
+    pace_new_ = pace_repeat_ = 0;
+    pace_hold1_ = pace_hold2_ = pace_hold3_ = pace_hold4p_ = 0;
+    pace_skip_ = 0;
 #endif
     stream_epoch_ = SDL_GetTicks64();
     thread_ = std::thread(&Engine::worker, this);
@@ -215,6 +227,9 @@ void Engine::stop() {
         std::lock_guard<std::mutex> lock(frame_mutex_);
         if (shared_frame_) av_frame_free(&shared_frame_);
         if (present_frame_) av_frame_free(&present_frame_);
+        for (SmoothFrame& queued : smooth_frames_)
+            if (queued.frame) av_frame_free(&queued.frame);
+        smooth_frames_.clear();
         shared_frame_valid_ = false;
     }
 #endif
@@ -986,6 +1001,24 @@ bool Engine::run_peer(GssvSession& session) {
                     " dev=" + std::to_string(audio_.device_hz()) + "hz" +
                     " ema=" + std::to_string(a.ema_ms) + "ms" +
                     " adj=" + std::to_string(a.adj_ppm) + "ppm");
+#ifdef __SWITCH__
+                // Present cadence: new/repeated flips, hold-duration buckets
+                // (1/2/3/4+ refreshes), skipped frames, smooth-queue depth.
+                size_t smooth_q;
+                {
+                    std::lock_guard<std::mutex> lock(frame_mutex_);
+                    smooth_q = smooth_frames_.size();
+                }
+                log("pace| new=" + std::to_string(pace_new_.exchange(0)) +
+                    " rep=" + std::to_string(pace_repeat_.exchange(0)) +
+                    " hold=" + std::to_string(pace_hold1_.exchange(0)) + "/" +
+                    std::to_string(pace_hold2_.exchange(0)) + "/" +
+                    std::to_string(pace_hold3_.exchange(0)) + "/" +
+                    std::to_string(pace_hold4p_.exchange(0)) +
+                    " skip=" + std::to_string(pace_skip_.exchange(0)) +
+                    " src=" + (source_refresh_period_.load() == 2 ? "30" : "60") +
+                    "fps q=" + std::to_string(smooth_q));
+#endif
             }
         }
 
@@ -1029,11 +1062,49 @@ void Engine::decode_loop() {
             video_queue_.pop_front();
         }
         if (video_.decode(unit.data(), unit.size())) {
+            // Detect the source cadence from decode spacing: ~16 ms gaps mean
+            // a 60 fps stream (present every refresh), ~33 ms mean 30 fps
+            // (present every other refresh). Streaks of 8 debounce the flips
+            // xCloud makes mid-stream. Only Smooth pacing consumes this.
+            Uint64 decoded_at = SDL_GetTicks64();
+            if (last_decode_ticks_) {
+                Uint64 gap = decoded_at - last_decode_ticks_;
+                if (gap < 25) {
+                    ++source_fast_streak_;
+                    source_slow_streak_ = 0;
+                    if (source_fast_streak_ >= 8)
+                        source_refresh_period_.store(1,
+                                                     std::memory_order_relaxed);
+                } else if (gap < 55) {
+                    ++source_slow_streak_;
+                    source_fast_streak_ = 0;
+                    if (source_slow_streak_ >= 8)
+                        source_refresh_period_.store(2,
+                                                     std::memory_order_relaxed);
+                }
+            }
+            last_decode_ticks_ = decoded_at;
             {
                 std::lock_guard<std::mutex> lock(frame_mutex_);
-                av_frame_unref(shared_frame_);
-                av_frame_ref(shared_frame_, video_.current_frame());
-                shared_frame_valid_ = true;
+                ++shared_frame_seq_;
+                if (pacing_ == VideoPacing::Smooth) {
+                    // Source order, not newest-wins: the clone refs the same
+                    // NVTEGRA surface, so the hard cap below is what keeps the
+                    // decoder's surface pool from starving.
+                    AVFrame* queued = av_frame_clone(video_.current_frame());
+                    if (queued)
+                        smooth_frames_.push_back({queued, shared_frame_seq_});
+                    while (smooth_frames_.size() > 4) {
+                        SmoothFrame stale = smooth_frames_.front();
+                        smooth_frames_.pop_front();
+                        if (stale.frame) av_frame_free(&stale.frame);
+                        pace_skip_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                } else {
+                    av_frame_unref(shared_frame_);
+                    av_frame_ref(shared_frame_, video_.current_frame());
+                    shared_frame_valid_ = true;
+                }
             }
             if (!got_frame_) {
                 got_frame_ = true;
@@ -1049,8 +1120,8 @@ void Engine::decode_loop() {
 
 SDL_Texture* Engine::pump_video() {
 #ifdef __SWITCH__
-    // Present-only: decode_thread_ produces frames. Present the freshest decoded
-    // frame on a STEADY software clock (~59.9 Hz), not once per network frame:
+    // Present-only: decode_thread_ produces frames. Present decoded frames on
+    // a STEADY software clock (59.94 Hz), not once per network frame:
     //  * Stutter: presenting on network arrival ties the flip cadence to arrival
     //    jitter, which drifts against the panel's 60 Hz -> periodic judder even
     //    on a fast link. A steady local clock decouples the two.
@@ -1058,25 +1129,79 @@ SDL_Texture* Engine::pump_video() {
     //    keeps a static / low-fps scene (e.g. a "syncing save" screen where
     //    xCloud nearly stops sending) from decaying to an empty surface -- which
     //    the YUV->RGB shader turns bright green.
-    // The rate is a hair UNDER 60 Hz on purpose: deko3d aborts (acquireImage ->
+    // The rate matches the panel's NTSC-derived 59.94 Hz in performance-counter
+    // ticks (whole-millisecond deadlines quantize to an uneven 16/17 ms grid).
+    // Staying at-or-under the panel rate matters: deko3d aborts (acquireImage ->
     // DkResult_Fail) if we queue frames faster than the compositor drains them.
     // We take our OWN ref of the shared frame so the decode thread can keep
     // producing without recycling the surface the GPU is still sampling.
-    constexpr double kPresentIntervalMs = 1000.0 / 59.9;  // ~16.69 ms
-    double now = static_cast<double>(SDL_GetTicks64());
-    if (dk_video_.initialized() && got_frame_ && now >= next_present_ms_) {
+    constexpr double kDisplayHz = 59.94;
+    const double interval =
+        static_cast<double>(SDL_GetPerformanceFrequency()) / kDisplayHz;
+    double now = static_cast<double>(SDL_GetPerformanceCounter());
+    if (dk_video_.initialized() && got_frame_ && now >= next_present_counter_) {
         AVFrame* frame = nullptr;
+        uint64_t frame_seq = 0;
         {
             std::lock_guard<std::mutex> lock(frame_mutex_);
-            if (shared_frame_valid_) {
+            if (pacing_ == VideoPacing::Smooth) {
+                uint32_t period =
+                    source_refresh_period_.load(std::memory_order_relaxed);
+                bool due = !smooth_have_present_ ||
+                           ++smooth_refresh_phase_ >= period;
+                // >= 2 keeps one decoded frame in reserve so a late arrival
+                // becomes a queue dip, not a visible repeat.
+                if (due && smooth_frames_.size() >= 2) {
+                    SmoothFrame next = smooth_frames_.front();
+                    smooth_frames_.pop_front();
+                    av_frame_unref(present_frame_);
+                    av_frame_move_ref(present_frame_, next.frame);
+                    av_frame_free(&next.frame);
+                    frame_seq = next.seq;
+                    smooth_have_present_ = true;
+                    smooth_refresh_phase_ = 0;
+                } else if (smooth_have_present_) {
+                    frame_seq = last_present_seq_;  // hold the current frame
+                }
+                if (smooth_have_present_) frame = present_frame_;
+            } else if (shared_frame_valid_) {
                 av_frame_unref(present_frame_);
                 if (av_frame_ref(present_frame_, shared_frame_) == 0)
                     frame = present_frame_;
+                frame_seq = shared_frame_seq_;
             }
         }
-        if (frame) dk_video_.render(frame);
-        next_present_ms_ += kPresentIntervalMs;
-        if (next_present_ms_ < now) next_present_ms_ = now + kPresentIntervalMs;
+        if (frame) {
+            // Hold accounting for the pace| line: how many refreshes the
+            // previous frame stayed up (2/2/2... = perfect 30 fps cadence).
+            if (frame_seq != last_present_seq_) {
+                pace_new_.fetch_add(1, std::memory_order_relaxed);
+                if (last_present_seq_) {
+                    if (present_hold_refreshes_ == 1)
+                        pace_hold1_.fetch_add(1, std::memory_order_relaxed);
+                    else if (present_hold_refreshes_ == 2)
+                        pace_hold2_.fetch_add(1, std::memory_order_relaxed);
+                    else if (present_hold_refreshes_ == 3)
+                        pace_hold3_.fetch_add(1, std::memory_order_relaxed);
+                    else
+                        pace_hold4p_.fetch_add(1, std::memory_order_relaxed);
+                    if (frame_seq > last_present_seq_ + 1)
+                        pace_skip_.fetch_add(
+                            static_cast<uint32_t>(frame_seq -
+                                                  last_present_seq_ - 1),
+                            std::memory_order_relaxed);
+                }
+                last_present_seq_ = frame_seq;
+                present_hold_refreshes_ = 1;
+            } else {
+                pace_repeat_.fetch_add(1, std::memory_order_relaxed);
+                ++present_hold_refreshes_;
+            }
+            dk_video_.render(frame);
+        }
+        next_present_counter_ += interval;
+        if (next_present_counter_ < now)
+            next_present_counter_ = now + interval;
     }
     return nullptr;
 #else
