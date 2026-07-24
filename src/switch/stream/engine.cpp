@@ -490,34 +490,60 @@ bool Engine::take_rumble(RumbleCommand& out) {
 
 // ---- worker ---------------------------------------------------------------
 
+// The session-setup phase is pure HTTP with nothing on screen but a status
+// line, so every stage logs -- otherwise a stall here leaves a banner-only
+// log with no way to tell WHERE it happened.
+const char* session_state_name(SessionState state) {
+    switch (state) {
+        case SessionState::New: return "new";
+        case SessionState::Provisioning: return "provisioning";
+        case SessionState::WaitingForResources: return "waiting for resources";
+        case SessionState::ReadyToConnect: return "ready to connect";
+        case SessionState::Provisioned: return "provisioned";
+        case SessionState::Failed: return "failed";
+    }
+    return "?";
+}
+
 void Engine::worker() {
     try {
         bool home = !home_server_id_.empty();
         set_status(home ? "Signing in to your Xbox..."
                         : "Signing in to xCloud...");
+        log("fetching streaming credentials");
         StreamingCredentials creds = auth_.fetch_streaming_credentials();
         cloud_ = home ? creds.home : creds.cloud;
 
         set_status("Cleaning up old sessions...");
         GssvSession::cleanup_stale_sessions(http_, cloud_,
                                             home ? "home" : "cloud");
+        log("stale-session cleanup done");
 
         // Home streaming: a session request against a sleeping console acts
         // as the wake-up call but fails with AgentCommandError while the
         // console boots its streaming service (same behaviour Greenlight
         // sees). Retry a few times before surfacing the failure.
-        int attempts = home ? 4 : 1;
+        // Cloud gets one retry too: a session can come up with a dead media
+        // path (ICE connects, DTLS never answers) -- a fresh session
+        // re-rolls that server-side fault.
+        int attempts = home ? 4 : 2;
         for (int attempt = 0; attempt < attempts && !quit_; ++attempt) {
             if (attempt > 0) {
-                set_status("Waking your console... (attempt " +
-                           std::to_string(attempt + 1) + " of " +
-                           std::to_string(attempts) + ")");
-                for (int i = 0; i < 50 && !quit_; ++i)  // ~5 s between tries
+                set_status(home ? "Waking your console... (attempt " +
+                                      std::to_string(attempt + 1) + " of " +
+                                      std::to_string(attempts) + ")"
+                                : "Retrying the connection...");
+                // Home consoles need ~5 s to boot streaming. Cloud needs the
+                // dead session's teardown to release the account's slot, or
+                // the fresh request queues in "waiting for resources".
+                for (int i = 0; i < (home ? 50 : 30) && !quit_; ++i)
                     std::this_thread::sleep_for(
                         std::chrono::milliseconds(100));
                 if (quit_) break;
             }
             set_status("Requesting a session...");
+            log("requesting session (attempt " + std::to_string(attempt + 1) +
+                " of " + std::to_string(attempts) + ")");
             // Home: the console agent only accepts the android fingerprint
             // (green-vita, the working reference, always sends it) -- the
             // windows/tizen quality-tier fingerprints get AgentCommandError.
@@ -527,20 +553,34 @@ void Engine::worker() {
                 session.start_home(home_server_id_);
             else
                 session.start_cloud(title_id_);
+            log("session created, polling state");
 
             set_status("Waiting for a server...");
             bool connected = false;
+            bool retry_transport = false;
+            SessionState logged_state = SessionState::New;
             std::string session_error;
             for (int i = 0; i < 300 && !quit_; ++i) {
                 SessionState state = session.refresh_state();
+                if (state != logged_state) {
+                    logged_state = state;
+                    log(std::string("session state: ") +
+                        session_state_name(state) + " (poll " +
+                        std::to_string(i) + ")");
+                }
                 if (state == SessionState::ReadyToConnect && !connected) {
                     set_status("Authenticating...");
                     session.connect(auth_.fetch_passport_token());
                     connected = true;
                 } else if (state == SessionState::Provisioned) {
-                    run_peer(session);
-                    session.stop();
-                    return;
+                    if (run_peer(session)) {
+                        session.stop();
+                        return;
+                    }
+                    // Dead media path: retry with a fresh session; only the
+                    // last attempt surfaces a failure to the user.
+                    retry_transport = true;
+                    break;
                 } else if (state == SessionState::Failed) {
                     session_error = session.error_details();
                     break;
@@ -549,6 +589,28 @@ void Engine::worker() {
             }
             session.stop();
             if (quit_) return;
+            if (retry_transport) {
+                if (attempt == attempts - 1) {
+                    fail("The server's media connection never came up");
+                    return;
+                }
+                log("retrying with a fresh session (dead media path)");
+                {
+                    // Dispose of the dead attempt's peer (normally stop()'s
+                    // job) so the next run_peer starts from scratch.
+                    std::lock_guard<std::mutex> lock(peer_mutex_);
+                    if (peer_) {
+                        peer_connection_close(peer_);
+                        peer_connection_destroy(peer_);
+                        peer_ = nullptr;
+                    }
+                }
+                peer_state_ = PEER_CONNECTION_NEW;
+                channels_open_ = false;
+                handshake_done_ = false;
+                state_ = EngineState::StartingSession;  // back to connect UI
+                continue;
+            }
             bool agent_error =
                 session_error.find("AgentCommandError") != std::string::npos;
             if (session_error.empty()) {
@@ -568,7 +630,7 @@ void Engine::worker() {
     }
 }
 
-void Engine::run_peer(GssvSession& session) {
+bool Engine::run_peer(GssvSession& session) {
     state_ = EngineState::Negotiating;
     set_status("Negotiating connection...");
 
@@ -586,7 +648,7 @@ void Engine::run_peer(GssvSession& session) {
         peer_ = peer_connection_create(&config);
         if (!peer_) {
             fail("Failed to create peer connection");
-            return;
+            return true;
         }
         peer_connection_oniceconnectionstatechange(peer_,
                                                    &Engine::on_state_change);
@@ -605,7 +667,7 @@ void Engine::run_peer(GssvSession& session) {
     }
     if (!offer) {
         fail("Failed to create SDP offer");
-        return;
+        return true;
     }
     log("local offer created (" + std::to_string(std::strlen(offer)) +
         " bytes)");
@@ -710,7 +772,7 @@ void Engine::run_peer(GssvSession& session) {
         log("  local  cand: " + candidate);
     if (remote.empty()) {
         fail("Server sent no ICE candidates");
-        return;
+        return true;
     }
 
     {
@@ -724,6 +786,7 @@ void Engine::run_peer(GssvSession& session) {
     }
     log("remote description set, checking connectivity");
 
+    Uint64 ice_connected_at = 0;  // when peer state first reached connected
     Uint64 last_keepalive = SDL_GetTicks64();
     Uint64 last_rr = SDL_GetTicks64();
     Uint64 last_consent = SDL_GetTicks64();
@@ -779,12 +842,26 @@ void Engine::run_peer(GssvSession& session) {
 
         if (peer_state_ == PEER_CONNECTION_FAILED) {
             fail("WebRTC connection failed");
-            return;
+            return true;
+        }
+        // Dead media path: ICE is up (the front-door placeholder answers
+        // STUN) but DTLS/SCTP never completes -- the handshake starves on
+        // CONN_EOF because nothing behind the front door talks back. Healthy
+        // sessions open their channels ~1-2 s after connecting, so 12 s means
+        // never. Hand the decision to worker(): one fresh session re-rolls
+        // it, instead of grinding out the full 45 s timeout below.
+        if (!ice_connected_at && (current == PEER_CONNECTION_CONNECTED ||
+                                  current == PEER_CONNECTION_COMPLETED))
+            ice_connected_at = now;
+        if (ice_connected_at && !channels_open_ &&
+            now - ice_connected_at > 12000) {
+            log("ICE connected but DTLS/SCTP never completed -- dead media path");
+            return false;
         }
         if (state_ == EngineState::Negotiating &&
             SDL_GetTicks64() - negotiation_started > 45000) {
             fail("Connection timed out");
-            return;
+            return true;
         }
 
         // Until the first frame decodes, keep asking for a keyframe. xCloud may
@@ -880,6 +957,7 @@ void Engine::run_peer(GssvSession& session) {
         if (!drained_any)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    return true;  // stop requested: a normal end, nothing to retry
 }
 
 // ---- render-thread interface ----------------------------------------------

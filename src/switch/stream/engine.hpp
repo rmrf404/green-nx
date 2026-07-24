@@ -89,7 +89,11 @@ private:
                       const std::string& locale);
     void worker();
     void decode_loop();  // Switch: dedicated H.264 decode thread (see engine.cpp)
-    void run_peer(GssvSession& session);
+    // Runs the WebRTC session to completion. Returns false only when ICE
+    // connected but DTLS/SCTP never came up (dead media path) -- worker()
+    // then retries once with a fresh session. Every other outcome, including
+    // ordinary failures, returns true.
+    bool run_peer(GssvSession& session);
     void set_status(const std::string& status);
     void fail(const std::string& error);
     void handle_channel_message(uint16_t sid, const char* data, size_t size);
