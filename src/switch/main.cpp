@@ -146,6 +146,7 @@ struct Settings {
     // Smooth video pacing: steadier motion for about one source frame of
     // extra latency ("Video pacing" row / "smooth" in settings.json).
     bool smooth = false;
+    int sharpness = 0;  // luma sharpening: 0=Off, 1=Low, 2=Medium, 3=High
 };
 
 constexpr int kLanguageCount = 14;
@@ -280,6 +281,7 @@ Settings load_settings() {
     settings.source = std::clamp(data.value("source", 0), 0, 2);
     settings.volume = std::clamp(data.value("volume", 1.0f), 0.5f, 4.0f);
     settings.smooth = data.value("smooth", false);
+    settings.sharpness = std::clamp(data.value("sharpness", 0), 0, 3);
     return settings;
 }
 
@@ -292,7 +294,8 @@ void save_settings(const Settings& settings) {
                 {"language", settings.language},
                 {"source", settings.source},
                 {"volume", settings.volume},
-                {"smooth", settings.smooth}}.dump(2);
+                {"smooth", settings.smooth},
+                {"sharpness", settings.sharpness}}.dump(2);
 }
 
 // Streamed console's system language (BCP-47). Games without an in-game
@@ -833,6 +836,7 @@ const char* kTabNames[kTabCount] = {"All games", "Favorites", "History",
 const char* kQualityLabels[3] = {"720p", "1080p", "1080p high bitrate"};
 const char* kMappingLabels[2] = {"Positional (Switch A = Xbox B)",
                                  "Match labels (Switch A = Xbox A)"};
+const char* kSharpnessLabels[4] = {"Off", "Low", "Medium", "High"};
 
 const HomeConsole& selected_console(const App& app) {
     return app.consoles[std::clamp(
@@ -855,6 +859,7 @@ void launch_stream(App& app, bool home) {
     app.engine->set_audio_gain(app.settings.volume);
     app.engine->set_pacing(app.settings.smooth ? stream::VideoPacing::Smooth
                                                : stream::VideoPacing::Steady);
+    app.engine->set_sharpness(app.settings.sharpness);
     if (app.launching_home)
         app.engine->start_home(selected_console(app).server_id, tier, locale);
     else
@@ -1234,6 +1239,7 @@ void draw_settings(App& app) {
         {"Volume",
          std::to_string(static_cast<int>(app.settings.volume * 100 + 0.5f)) + "%"},
         {"Video pacing", app.settings.smooth ? "Smooth" : "Standard"},
+        {"Sharpness", kSharpnessLabels[app.settings.sharpness]},
     };
     if (!app.consoles.empty())
         rows.push_back({"Preferred source",
@@ -1320,6 +1326,10 @@ void draw_settings(App& app) {
             line2 = "steadier 30 fps scenes for about one frame of extra lag.";
             break;
         case 7:
+            line1 = "Sharpens the streamed image, which is a touch soft at";
+            line2 = "cloud bitrates. Low is subtle; High can ring on edges.";
+            break;
+        case 8:
             line1 = "Where Play launches games: xCloud (cloud servers) or";
             line2 = "remote play from your own console over your network.";
             break;
@@ -2128,8 +2138,9 @@ int main(int argc, char** argv) {
 
             case Scene::Settings: {
                 // Row order: quality, mapping, vibration, region, language,
-                // volume, pacing, [source when a console is linked], sign out.
-                int signout_row = app.consoles.empty() ? 7 : 8;
+                // volume, pacing, sharpness, [source when a console is
+                // linked], sign out.
+                int signout_row = app.consoles.empty() ? 8 : 9;
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
@@ -2179,6 +2190,9 @@ int main(int argc, char** argv) {
                             app.settings.volume + direction * 0.5f, 0.5f, 4.0f);
                     else if (app.settings_cursor == 6)
                         app.settings.smooth = !app.settings.smooth;
+                    else if (app.settings_cursor == 7)
+                        app.settings.sharpness =
+                            (app.settings.sharpness + direction + 4) % 4;
                     else
                         app.settings.source =
                             (app.settings.source + direction + 3) % 3;

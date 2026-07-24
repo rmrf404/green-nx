@@ -37,6 +37,12 @@ public:
 
     void set_logger(LogFn fn) { log_ = std::move(fn); }
 
+    // Luma sharpening level for the fragment shader: 0=Off, 1=Low, 2=Medium,
+    // 3=High. Set before init(); fixed for the stream's lifetime.
+    void set_sharpness(int level) {
+        sharpness_ = level < 0 ? 0 : (level > 3 ? 3 : level);
+    }
+
     // Bring up the deko3d device/swapchain. Call after SDL has released the
     // window. Returns false (and logs) on failure.
     bool init();
@@ -126,6 +132,7 @@ private:
     uint32_t chroma_w_ = 0, chroma_h_ = 0;
     bool linear_ = false;                // pitch-linear surface?
     bool transform_dirty_ = true;
+    int sharpness_ = 0;  // 0=Off..3=High, baked into the UBO (set_sharpness)
     int color_space_ = -1;
     bool color_full_ = false;
     bool warned_not_hw_ = false;

@@ -49,8 +49,9 @@ struct Transformation {
     alignas(16) float yuvmat_col2[4];
     alignas(16) float offset[4];
     alignas(16) float uv_data[4];
+    alignas(16) float sharp_data[4];  // x=strength, y=overshoot allowance
 };
-static_assert(sizeof(Transformation) == 80, "std140 Transformation");
+static_assert(sizeof(Transformation) == 96, "std140 Transformation");
 
 // Column-major YUV->RGB matrices (matching Moonlight-Switch / BT.xxx).
 const float kBt601Lim[9] = {1.1644f, 1.1644f, 1.1644f, 0.0f,    -0.3917f,
@@ -340,9 +341,15 @@ void DkVideoRenderer::update_transform(AVFrame* frame) {
     t.uv_data[1] = 0.0f;
     t.uv_data[2] = luma_w_ ? (float)frame_w_ / (float)luma_w_ : 1.0f;
     t.uv_data[3] = luma_h_ ? (float)frame_h_ / (float)luma_h_ : 1.0f;
+    // Off / Low / Medium / High. Strength scales the unsharp mask; overshoot
+    // is how far past the local min/max an edge may ring before it clamps.
+    static constexpr float kSharpStrength[4] = {0.0f, 0.60f, 1.20f, 2.0f};
+    static constexpr float kSharpOvershoot[4] = {0.0f, 0.02f, 0.035f, 0.05f};
+    t.sharp_data[0] = kSharpStrength[sharpness_];
+    t.sharp_data[1] = kSharpOvershoot[sharpness_];
     std::memcpy(static_cast<uint8_t*>(data_cpu_) + kUniformOff, &t, sizeof(t));
-    logf("deko3d: color space=%d full=%d crop=%.4fx%.4f", space, (int)full,
-         t.uv_data[2], t.uv_data[3]);
+    logf("deko3d: color space=%d full=%d crop=%.4fx%.4f sharp=%d", space,
+         (int)full, t.uv_data[2], t.uv_data[3], sharpness_);
 }
 
 DkVideoRenderer::FrameMapping* DkVideoRenderer::map_frame(AVFrame* frame,

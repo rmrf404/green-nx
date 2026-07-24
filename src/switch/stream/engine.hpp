@@ -69,6 +69,10 @@ public:
     // before each stream start; default Steady.
     void set_pacing(VideoPacing pacing) { pacing_ = pacing; }
 
+    // Luma sharpening level (0=Off..3=High), forwarded to the deko3d
+    // renderer. Set from the "sharpness" setting before each stream start.
+    void set_sharpness(int level) { sharpness_ = level; }
+
     EngineState state() const { return state_; }
     std::string status() const;
     std::string error() const;
@@ -147,6 +151,7 @@ private:
     std::string locale_ = "en-US";  // streamed console's system language
     float audio_gain_ = 1.0f;       // forwarded to AudioPlayer::set_gain
     VideoPacing pacing_ = VideoPacing::Steady;  // set before start()
+    int sharpness_ = 0;  // 0=Off..3=High, forwarded to DkVideoRenderer
 public:
     void log(const std::string& line);  // also used by the libpeer log sink
 
