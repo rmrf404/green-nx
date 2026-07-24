@@ -10,10 +10,12 @@
 // The owner suspends SDL (Gfx::suspend) before init() and resumes it after
 // shutdown(); during streaming deko3d owns the framebuffer exclusively.
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <deko3d.hpp>
@@ -22,6 +24,11 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
 }
+
+// Forward-declared to keep SDL_ttf out of this header (it's a plain pointer
+// member here; the full type comes from SDL_ttf.h in the .cpp).
+struct _TTF_Font;
+typedef struct _TTF_Font TTF_Font;
 
 namespace gnx::stream {
 
@@ -41,6 +48,18 @@ public:
     // 3=High. Set before init(); fixed for the stream's lifetime.
     void set_sharpness(int level) {
         sharpness_ = level < 0 ? 0 : (level > 3 ? 3 : level);
+    }
+
+    // Enable/disable the debug HUD overlay pass (drawn on top of the video).
+    void set_hud_enabled(bool e) { hud_enabled_ = e; }
+
+    // Live network stats for the HUD, fed once per second from the streaming
+    // worker thread (stored atomically; read on the render thread).
+    void set_net_stats(float mbps, float loss_pct, int buffer_ms) {
+        net_mbps_.store(mbps, std::memory_order_relaxed);
+        net_loss_.store(loss_pct, std::memory_order_relaxed);
+        net_buffer_ms_.store(buffer_ms, std::memory_order_relaxed);
+        net_valid_.store(true, std::memory_order_relaxed);
     }
 
     // Bring up the deko3d device/swapchain. Call after SDL has released the
@@ -91,6 +110,9 @@ private:
     FrameMapping* map_frame(AVFrame* frame, void* base, uint32_t handle,
                             uint32_t size);  // zero-copy import (cached)
     void update_transform(AVFrame* frame);
+    void update_hud(AVFrame* frame);   // recompute stats, re-rasterize on change
+    void rasterize_hud();              // compose panel bg + text into hud_cpu_
+    void blit_text(const char* s, int x, int y);  // white text onto hud_pixels_
 
     LogFn log_;
     bool initialized_ = false;
@@ -110,6 +132,7 @@ private:
 
     dk::Shader vertex_shader_;
     dk::Shader fragment_shader_;
+    dk::Shader hud_fsh_;  // HUD overlay (stage 0: flat panel; stage 1: text)
 
     // data_memblock_ sub-allocations (offsets):
     uint32_t vtx_offset_ = 0;        // quad vertex buffer
@@ -137,6 +160,27 @@ private:
     bool color_full_ = false;
     bool warned_not_hw_ = false;
     bool logged_surface_ = false;
+    bool hud_enabled_ = false;  // draw the debug HUD overlay pass
+
+    // Debug HUD text (stage 1): stats composited on the CPU into a pitch-linear
+    // RGBA texture, sampled by hud_fsh_ in the overlay pass.
+    static constexpr uint32_t kHudTexW = 512;
+    static constexpr uint32_t kHudTexH = 160;
+    TTF_Font* hud_font_ = nullptr;
+    dk::UniqueMemBlock hud_memblock_;
+    dk::Image hud_image_;
+    dk::ImageDescriptor hud_desc_;
+    void* hud_cpu_ = nullptr;
+    std::vector<uint32_t> hud_pixels_;   // CPU compose buffer (kHudTexW*kHudTexH)
+    std::string hud_text_cache_;         // last rasterized text (skip if unchanged)
+    uint64_t fps_tick_ = 0;              // armGetSystemTick at last FPS sample
+    int fps_frames_ = 0;                 // distinct frames presented this window
+    const uint8_t* fps_last_data_ = nullptr;  // last frame's surface, for dedup
+    float fps_ = 0.0f;
+    std::atomic<float> net_mbps_{0.0f};   // set by Engine worker, read by update_hud
+    std::atomic<float> net_loss_{0.0f};
+    std::atomic<int> net_buffer_ms_{0};
+    std::atomic<bool> net_valid_{false};
 };
 
 }  // namespace gnx::stream

@@ -147,6 +147,7 @@ struct Settings {
     // extra latency ("Video pacing" row / "smooth" in settings.json).
     bool smooth = false;
     int sharpness = 0;  // luma sharpening: 0=Off, 1=Low, 2=Medium, 3=High
+    int debug_hud = 0;  // 0=off, 1=on: on-screen debug overlay while streaming
 };
 
 constexpr int kLanguageCount = 14;
@@ -282,6 +283,7 @@ Settings load_settings() {
     settings.volume = std::clamp(data.value("volume", 1.0f), 0.5f, 4.0f);
     settings.smooth = data.value("smooth", false);
     settings.sharpness = std::clamp(data.value("sharpness", 0), 0, 3);
+    settings.debug_hud = std::clamp(data.value("debug_hud", 0), 0, 1);
     return settings;
 }
 
@@ -295,7 +297,8 @@ void save_settings(const Settings& settings) {
                 {"source", settings.source},
                 {"volume", settings.volume},
                 {"smooth", settings.smooth},
-                {"sharpness", settings.sharpness}}.dump(2);
+                {"sharpness", settings.sharpness},
+                {"debug_hud", settings.debug_hud}}.dump(2);
 }
 
 // Streamed console's system language (BCP-47). Games without an in-game
@@ -860,6 +863,7 @@ void launch_stream(App& app, bool home) {
     app.engine->set_pacing(app.settings.smooth ? stream::VideoPacing::Smooth
                                                : stream::VideoPacing::Steady);
     app.engine->set_sharpness(app.settings.sharpness);
+    app.engine->set_debug_hud(app.settings.debug_hud != 0);
     if (app.launching_home)
         app.engine->start_home(selected_console(app).server_id, tier, locale);
     else
@@ -1246,6 +1250,7 @@ void draw_settings(App& app) {
                         app.settings.source == 2   ? console_label(app)
                         : app.settings.source == 1 ? "xCloud"
                                                    : "Ask every time"});
+    rows.push_back({"Debug HUD", app.settings.debug_hud ? "On" : "Off"});
     // Sign out lives here rather than on a library shoulder button so a stray
     // press can never log the account out; it also takes a second A to confirm.
     int signout_row = static_cast<int>(rows.size());
@@ -1253,10 +1258,10 @@ void draw_settings(App& app) {
                                     ? "Press A again to confirm"
                                     : app.gamertag});
     // The list must clear the note box at y=820, which fits 8 rows at the
-    // tightened 78/70 pitch. A linked console now makes 9 (volume + pacing +
-    // source + sign out), so instead of shrinking rows a third time the list
-    // scrolls: an 8-row window slides only when the cursor crosses its edge,
-    // and dots mark hidden rows. Up to 7 rows keeps the original 108/92 look.
+    // tightened 78/70 pitch. Volume + pacing + Debug HUD (+ source + sign out on
+    // a linked console) overflow that, so instead of shrinking rows further the
+    // list scrolls: an 8-row window slides only when the cursor crosses its
+    // edge, and dots mark hidden rows. Up to 7 rows keeps the original 108/92.
     constexpr int kVisibleRows = 8;
     int shown = std::min(static_cast<int>(rows.size()), kVisibleRows);
     int first = std::clamp(app.settings_cursor - (kVisibleRows - 1), 0,
@@ -1316,6 +1321,9 @@ void draw_settings(App& app) {
     if (app.settings_cursor == signout_row) {
         line1 = "Signs this Switch out of your Microsoft account and clears";
         line2 = "the saved sign-in. Cloud saves and games are not affected.";
+    } else if (app.settings_cursor == signout_row - 1) {
+        line1 = "On-screen overlay with live stream stats (resolution, FPS,";
+        line2 = "bitrate, loss). A debug tool -- turn it off for clean playback.";
     } else switch (app.settings_cursor) {
         case 5:
             line1 = "Output volume for streamed audio — raise it if the stream";
@@ -2138,9 +2146,9 @@ int main(int argc, char** argv) {
 
             case Scene::Settings: {
                 // Row order: quality, mapping, vibration, region, language,
-                // volume, pacing, sharpness, [source when a console is
-                // linked], sign out.
-                int signout_row = app.consoles.empty() ? 8 : 9;
+                // volume, pacing, sharpness, [source when a console is linked],
+                // Debug HUD, sign out.
+                int signout_row = app.consoles.empty() ? 9 : 10;
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
@@ -2193,9 +2201,17 @@ int main(int argc, char** argv) {
                     else if (app.settings_cursor == 7)
                         app.settings.sharpness =
                             (app.settings.sharpness + direction + 4) % 4;
-                    else
-                        app.settings.source =
-                            (app.settings.source + direction + 3) % 3;
+                    else {
+                        // Rows 8+ : "Preferred source" (8, only with a linked
+                        // console), then "Debug HUD" (at signout_row - 1).
+                        int src_row = app.consoles.empty() ? -1 : 8;
+                        if (app.settings_cursor == src_row)
+                            app.settings.source =
+                                (app.settings.source + direction + 3) % 3;
+                        else if (app.settings_cursor == signout_row - 1)
+                            app.settings.debug_hud =
+                                app.settings.debug_hud ? 0 : 1;
+                    }
                     save_settings(app.settings);
                 }
                 if (input.b || input.zl) {

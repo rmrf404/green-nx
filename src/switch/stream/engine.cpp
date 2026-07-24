@@ -274,6 +274,7 @@ void Engine::on_video(uint8_t* data, size_t size, void* user) {
     // held). `data` is a raw RTP packet; the jitter buffer reorders/assembles
     // complete access units and only emits clean, keyframe-anchored frames.
     auto* self = static_cast<Engine*>(user);
+    self->video_bytes_.fetch_add(size, std::memory_order_relaxed);  // HUD bitrate
     bool want_keyframe = false;
     self->jitter_.receive(
         data, size, SDL_GetTicks64(),
@@ -871,6 +872,8 @@ bool Engine::run_peer(GssvSession& session) {
     Uint64 prev_audio_time = SDL_GetTicks64();
     uint32_t prev_audio_frames = 0;
     uint32_t prev_audio_out = 0;
+    uint64_t prev_hud_bytes = 0;               // HUD bitrate window (video bytes)
+    Uint64 prev_hud_time = SDL_GetTicks64();
     Uint64 idr_wait_start = 0;
     Uint64 last_idr_wait_log = 0;
     Uint64 negotiation_started = SDL_GetTicks64();
@@ -971,15 +974,32 @@ bool Engine::run_peer(GssvSession& session) {
             uint8_t fraction;
             uint32_t cumulative, highest_ext;
             if (jitter_.report_stats(&fraction, &cumulative, &highest_ext)) {
-                std::lock_guard<std::mutex> lock(peer_mutex_);
-                if (peer_) {
-                    peer_connection_send_receiver_report(peer_, fraction,
-                                                         cumulative, highest_ext, 0);
-                    peer_connection_send_remb(
-                        peer_,
-                        static_cast<uint32_t>(tier_profile(tier_).bitrate_kbps) *
-                            1000u);
+                {
+                    std::lock_guard<std::mutex> lock(peer_mutex_);
+                    if (peer_) {
+                        peer_connection_send_receiver_report(
+                            peer_, fraction, cumulative, highest_ext, 0);
+                        peer_connection_send_remb(
+                            peer_,
+                            static_cast<uint32_t>(tier_profile(tier_).bitrate_kbps) *
+                                1000u);
+                    }
                 }
+#ifdef __SWITCH__
+                // Feed the debug HUD: real bitrate (RTP video bytes over the
+                // window), packet loss (RTCP fraction), audio buffer depth.
+                uint64_t vb = video_bytes_.load(std::memory_order_relaxed);
+                double dt = (now > prev_hud_time)
+                                ? static_cast<double>(now - prev_hud_time)
+                                : 0.0;
+                float mbps = dt > 0.0 ? static_cast<double>(vb - prev_hud_bytes) *
+                                            8.0 / dt / 1000.0
+                                      : 0.0f;
+                prev_hud_bytes = vb;
+                prev_hud_time = now;
+                float loss_pct = static_cast<float>(fraction) * 100.0f / 255.0f;
+                dk_video_.set_net_stats(mbps, loss_pct, audio_.stats().queue_ms);
+#endif
             }
         }
 
@@ -1239,6 +1259,7 @@ bool Engine::begin_deko_output() {
 #ifdef __SWITCH__
     dk_video_.set_logger([this](const char* m) { log(std::string(m)); });
     dk_video_.set_sharpness(sharpness_);
+    dk_video_.set_hud_enabled(debug_hud_);
     bool ok = dk_video_.init();
     log(ok ? "deko3d output started" : "deko3d output FAILED to start");
     return ok;

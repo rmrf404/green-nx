@@ -2,6 +2,10 @@
 
 #include <switch.h>
 
+#define SDL_MAIN_HANDLED
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
+
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -19,7 +23,7 @@ namespace gnx::stream {
 
 namespace {
 
-constexpr uint32_t kCodeSize = 64 * 1024;
+constexpr uint32_t kCodeSize = 96 * 1024;  // video vsh + video fsh + hud fsh
 constexpr uint32_t kCmdSize = 64 * 1024;
 constexpr uint32_t kDataSize = 0x1000;
 
@@ -28,6 +32,7 @@ constexpr uint32_t kUniformOff = 0x000;   // Transformation UBO (256B aligned)
 constexpr uint32_t kSamplerOff = 0x100;   // sampler descriptor set
 constexpr uint32_t kImageOff = 0x200;     // image descriptor set (luma, chroma)
 constexpr uint32_t kVtxOff = 0x300;       // quad vertex buffer
+constexpr uint32_t kHudVtxOff = 0x380;    // HUD overlay corner quad
 
 struct Vertex {
     float position[3];
@@ -40,6 +45,15 @@ constexpr Vertex kQuad[] = {
     {{-1.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
     {{+1.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
     {{+1.0f, +1.0f, 0.0f}, {1.0f, 0.0f}},
+};
+
+// Top-left HUD overlay quad (deko3d clip space, UV top-left). Its aspect matches
+// the 512x160 HUD texture on a 16:9 output so the stats text isn't stretched.
+constexpr Vertex kHudQuad[] = {
+    {{-0.98f, +0.98f, 0.0f}, {0.0f, 0.0f}},
+    {{-0.98f, +0.66f, 0.0f}, {0.0f, 1.0f}},
+    {{-0.40f, +0.66f, 0.0f}, {1.0f, 1.0f}},
+    {{-0.40f, +0.98f, 0.0f}, {1.0f, 0.0f}},
 };
 
 // std140 layout for: mat3 yuvmat; vec3 offset; vec4 uv_data;
@@ -210,12 +224,15 @@ bool DkVideoRenderer::init() {
     };
     if (!load_shader(vertex_shader_, "romfs:/shaders/video_vsh.dksh", 0) ||
         !load_shader(fragment_shader_, "romfs:/shaders/video_fsh.dksh",
-                     0x8000)) {
+                     0x8000) ||
+        !load_shader(hud_fsh_, "romfs:/shaders/hud_fsh.dksh", 0x10000)) {
         return false;
     }
 
     // Vertex buffer (static).
     std::memcpy(static_cast<uint8_t*>(data_cpu_) + kVtxOff, kQuad, sizeof(kQuad));
+    std::memcpy(static_cast<uint8_t*>(data_cpu_) + kHudVtxOff, kHudQuad,
+                sizeof(kHudQuad));
 
     // Sampler descriptor (linear, clamp to edge). Written into the descriptor
     // set from the command buffer each frame (canonical deko3d pattern).
@@ -227,6 +244,45 @@ bool DkVideoRenderer::init() {
     sdesc.initialize(sampler);
     sampler_desc_ = sdesc;
 
+    // --- Debug HUD text texture (stage 1): a pitch-linear RGBA surface we
+    // compose on the CPU (panel background + stats) and sample in the overlay
+    // pass. Pitch-linear lets the CPU write pixels straight into the memblock
+    // (no staging copy), the same trick the linear video path uses. ---
+    hud_pixels_.assign(kHudTexW * kHudTexH, 0);
+    hud_text_cache_.clear();
+    fps_tick_ = 0;
+    fps_frames_ = 0;
+    {
+        uint32_t stride = kHudTexW * 4;
+        dk::ImageLayout hud_layout;
+        dk::ImageLayoutMaker{dev_}
+            .setFlags(DkImageFlags_UsageLoadStore | DkImageFlags_Usage2DEngine |
+                      DkImageFlags_PitchLinear)
+            .setFormat(DkImageFormat_RGBA8_Unorm)
+            .setDimensions(kHudTexW, kHudTexH)
+            .setPitchStride(stride)
+            .initialize(hud_layout);
+        uint32_t sz = (hud_layout.getSize() + 0xFFF) & ~0xFFFu;
+        hud_memblock_ = dk::MemBlockMaker{dev_, sz}
+                            .setFlags(DkMemBlockFlags_CpuUncached |
+                                      DkMemBlockFlags_GpuCached |
+                                      DkMemBlockFlags_Image)
+                            .create();
+        hud_cpu_ = hud_memblock_.getCpuAddr();
+        hud_image_.initialize(hud_layout, hud_memblock_, 0);
+        hud_desc_.initialize(hud_image_);
+    }
+    // System shared font (pl was initialized in main). A null font falls back to
+    // a panel with no text -- still proves the overlay, and never crashes.
+    if (!hud_font_) {
+        PlFontData fd;
+        if (R_SUCCEEDED(plGetSharedFontByType(&fd, PlSharedFontType_Standard))) {
+            SDL_RWops* rw = SDL_RWFromConstMem(fd.address, fd.size);
+            if (rw) hud_font_ = TTF_OpenFontRW(rw, 1, 28);
+        }
+        if (!hud_font_) logf("deko3d: HUD font unavailable (panel only)");
+    }
+
     initialized_ = true;
     logf("deko3d: initialized (fb %ux%u, %u framebuffers)", fb_width_, fb_height_,
          kFbNum);
@@ -235,6 +291,10 @@ bool DkVideoRenderer::init() {
 
 void DkVideoRenderer::shutdown() {
     if (dev_ && queue_) queue_.waitIdle();
+    if (hud_font_) {
+        TTF_CloseFont(hud_font_);  // also frees the RWops (opened with freesrc=1)
+        hud_font_ = nullptr;
+    }
     mappings_.clear();
     current_mapping_ = -1;
     swapchain_ = nullptr;
@@ -244,6 +304,8 @@ void DkVideoRenderer::shutdown() {
     cmd_memblock_ = nullptr;
     data_memblock_ = nullptr;
     fb_memblock_ = nullptr;
+    hud_memblock_ = nullptr;
+    hud_cpu_ = nullptr;
     dev_ = nullptr;
     initialized_ = false;
     frame_w_ = frame_h_ = 0;
@@ -400,6 +462,99 @@ DkVideoRenderer::FrameMapping* DkVideoRenderer::map_frame(AVFrame* frame,
     return &mappings_.back();
 }
 
+void DkVideoRenderer::blit_text(const char* s, int x, int y) {
+    if (!hud_font_ || !s || !*s) return;
+    SDL_Color white{255, 255, 255, 255};
+    SDL_Surface* surf = TTF_RenderUTF8_Blended(hud_font_, s, white);
+    if (!surf) return;
+    SDL_LockSurface(surf);
+    int bpp = surf->format->BytesPerPixel;
+    for (int j = 0; j < surf->h; ++j) {
+        int ty = y + j;
+        if (ty < 0 || ty >= static_cast<int>(kHudTexH)) continue;
+        auto* rowp = static_cast<uint8_t*>(surf->pixels) + j * surf->pitch;
+        for (int i = 0; i < surf->w; ++i) {
+            int tx = x + i;
+            if (tx < 0 || tx >= static_cast<int>(kHudTexW)) continue;
+            uint32_t p = 0;
+            std::memcpy(&p, rowp + i * bpp, bpp < 4 ? bpp : 4);
+            uint8_t r, g, b, a;
+            SDL_GetRGBA(p, surf->format, &r, &g, &b, &a);
+            if (a == 0) continue;
+            uint32_t& dst = hud_pixels_[ty * kHudTexW + tx];
+            uint8_t dr = dst & 0xFF, dg = (dst >> 8) & 0xFF,
+                    db = (dst >> 16) & 0xFF, da = (dst >> 24) & 0xFF;
+            float af = a / 255.0f, ia = 1.0f - af;
+            uint8_t nr = static_cast<uint8_t>(r * af + dr * ia);
+            uint8_t ng = static_cast<uint8_t>(g * af + dg * ia);
+            uint8_t nb = static_cast<uint8_t>(b * af + db * ia);
+            uint8_t na = static_cast<uint8_t>(a + da * ia);
+            dst = nr | (ng << 8) | (nb << 16) | (static_cast<uint32_t>(na) << 24);
+        }
+    }
+    SDL_UnlockSurface(surf);
+    SDL_FreeSurface(surf);
+}
+
+void DkVideoRenderer::rasterize_hud() {
+    // deko3d RGBA8_Unorm byte order is R,G,B,A -> pack little-endian. Fill the
+    // panel background (black, ~0.55 alpha), then composite the white text.
+    const uint32_t bg = static_cast<uint32_t>(140) << 24;
+    std::fill(hud_pixels_.begin(), hud_pixels_.end(), bg);
+    if (hud_font_) {
+        int y = 8;
+        int skip = TTF_FontLineSkip(hud_font_);
+        size_t start = 0;
+        while (start <= hud_text_cache_.size()) {
+            size_t nl = hud_text_cache_.find('\n', start);
+            std::string line = hud_text_cache_.substr(
+                start, nl == std::string::npos ? std::string::npos : nl - start);
+            blit_text(line.c_str(), 12, y);
+            y += skip;
+            if (nl == std::string::npos) break;
+            start = nl + 1;
+        }
+    }
+    if (hud_cpu_)
+        std::memcpy(hud_cpu_, hud_pixels_.data(), hud_pixels_.size() * 4);
+}
+
+void DkVideoRenderer::update_hud(AVFrame* frame) {
+    uint64_t now = armGetSystemTick();
+    uint64_t freq = armGetSystemTickFreq();
+    if (fps_tick_ == 0) fps_tick_ = now;
+    // Count distinct source frames, not present ticks: the renderer re-presents
+    // the held frame every ~60 Hz tick, so counting render passes would read ~60
+    // even for a 30 fps source. A newly decoded frame carries a new surface in
+    // data[0]; a re-presented frame keeps the previous pointer.
+    if (frame->data[0] != fps_last_data_) {
+        ++fps_frames_;
+        fps_last_data_ = frame->data[0];
+    }
+    uint64_t dt = now - fps_tick_;
+    if (dt >= freq / 2) {  // recompute FPS over ~0.5 s windows
+        fps_ = static_cast<float>(fps_frames_) * static_cast<float>(freq) /
+               static_cast<float>(dt);
+        fps_frames_ = 0;
+        fps_tick_ = now;
+    }
+    char buf[160];
+    if (net_valid_.load(std::memory_order_relaxed)) {
+        std::snprintf(buf, sizeof(buf),
+                      "%dx%d\n%.0f fps  %.1f Mbps\nloss %.1f%%  buf %dms",
+                      frame->width, frame->height, fps_,
+                      net_mbps_.load(std::memory_order_relaxed),
+                      net_loss_.load(std::memory_order_relaxed),
+                      net_buffer_ms_.load(std::memory_order_relaxed));
+    } else {
+        std::snprintf(buf, sizeof(buf), "%dx%d\n%.0f fps", frame->width,
+                      frame->height, fps_);
+    }
+    if (hud_text_cache_ == buf) return;  // unchanged -> keep the current texture
+    hud_text_cache_ = buf;
+    rasterize_hud();
+}
+
 bool DkVideoRenderer::render(AVFrame* frame) {
     if (!initialized_) return false;
     maybe_rebuild_swapchain();  // follow dock/undock (720p <-> 1080p)
@@ -451,6 +606,10 @@ bool DkVideoRenderer::render(AVFrame* frame) {
     FrameMapping* fm = map_frame(frame, base, handle, size);
     if (!fm) return false;
 
+    // Recompute HUD stats + re-rasterize the text texture now, while the GPU is
+    // idle (render() ends with waitIdle) and before we record any commands.
+    if (hud_enabled_) update_hud(frame);
+
     int slot = queue_.acquireImage(swapchain_);
 
     cmdbuf_.clear();
@@ -464,6 +623,9 @@ bool DkVideoRenderer::render(AVFrame* frame) {
                      sizeof(DkImageDescriptor));
     cmdbuf_.pushData(data_gpu_ + kImageOff + sizeof(DkImageDescriptor),
                      &fm->chroma_desc, sizeof(DkImageDescriptor));
+    // Image descriptor #2 = the HUD text texture (sampled by the overlay pass).
+    cmdbuf_.pushData(data_gpu_ + kImageOff + 2 * sizeof(DkImageDescriptor),
+                     &hud_desc_, sizeof(DkImageDescriptor));
 
     dk::ImageView view{framebuffers_[slot]};
     cmdbuf_.bindRenderTargets({&view});
@@ -488,7 +650,7 @@ bool DkVideoRenderer::render(AVFrame* frame) {
     cmdbuf_.bindDepthStencilState(depth_stencil);
 
     cmdbuf_.bindSamplerDescriptorSet(data_gpu_ + kSamplerOff, 1);
-    cmdbuf_.bindImageDescriptorSet(data_gpu_ + kImageOff, 2);
+    cmdbuf_.bindImageDescriptorSet(data_gpu_ + kImageOff, 3);
     cmdbuf_.barrier(DkBarrier_None,
                     DkInvalidateFlags_Image | DkInvalidateFlags_Descriptors);
 
@@ -505,6 +667,29 @@ bool DkVideoRenderer::render(AVFrame* frame) {
     cmdbuf_.bindVtxBuffer(0, data_gpu_ + kVtxOff, sizeof(kQuad));
 
     cmdbuf_.draw(DkPrimitive_Quads, 4, 1, 0, 0);
+
+    // --- HUD overlay pass (stage 1): sample the rasterized stats texture and
+    // alpha-blend it over the video, top-left. Reuses the video vertex shader;
+    // hud_fsh_ samples image descriptor #2 through sampler #0. Gated by the
+    // "Debug HUD" setting.
+    if (hud_enabled_) {
+        dk::BlendState hud_blend;
+        hud_blend.setColorBlendOp(DkBlendOp_Add);
+        hud_blend.setSrcColorBlendFactor(DkBlendFactor_SrcAlpha);
+        hud_blend.setDstColorBlendFactor(DkBlendFactor_InvSrcAlpha);
+        hud_blend.setAlphaBlendOp(DkBlendOp_Add);
+        hud_blend.setSrcAlphaBlendFactor(DkBlendFactor_One);
+        hud_blend.setDstAlphaBlendFactor(DkBlendFactor_InvSrcAlpha);
+        dk::ColorState hud_color;
+        hud_color.setBlendEnable(0, true);
+        cmdbuf_.bindBlendStates(0, {hud_blend});
+        cmdbuf_.bindColorState(hud_color);
+        cmdbuf_.bindShaders(DkStageFlag_GraphicsMask,
+                            {&vertex_shader_, &hud_fsh_});
+        cmdbuf_.bindTextures(DkStage_Fragment, 0, {dkMakeTextureHandle(2, 0)});
+        cmdbuf_.bindVtxBuffer(0, data_gpu_ + kHudVtxOff, sizeof(kHudQuad));
+        cmdbuf_.draw(DkPrimitive_Quads, 4, 1, 0, 0);
+    }
 
     queue_.submitCommands(cmdbuf_.finishList());
     queue_.presentImage(swapchain_, slot);
