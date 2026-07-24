@@ -523,7 +523,14 @@ void DkVideoRenderer::update_hud(AVFrame* frame) {
     uint64_t now = armGetSystemTick();
     uint64_t freq = armGetSystemTickFreq();
     if (fps_tick_ == 0) fps_tick_ = now;
-    ++fps_frames_;
+    // Count distinct source frames, not present ticks: the renderer re-presents
+    // the held frame every ~60 Hz tick, so counting render passes would read ~60
+    // even for a 30 fps source. A newly decoded frame carries a new surface in
+    // data[0]; a re-presented frame keeps the previous pointer.
+    if (frame->data[0] != fps_last_data_) {
+        ++fps_frames_;
+        fps_last_data_ = frame->data[0];
+    }
     uint64_t dt = now - fps_tick_;
     if (dt >= freq / 2) {  // recompute FPS over ~0.5 s windows
         fps_ = static_cast<float>(fps_frames_) * static_cast<float>(freq) /

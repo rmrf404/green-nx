@@ -233,7 +233,7 @@ private:
     // pump_video), in SDL performance-counter ticks: millisecond deadlines
     // quantized to an uneven 16/17 ms grid; the counter keeps the fraction.
     double next_present_counter_ = 0;
-    bool debug_hud_ = true;                 // draw the debug HUD overlay
+    bool debug_hud_ = false;                // draw the debug HUD overlay
     std::atomic<Uint64> last_keyframe_req_{0};
     std::atomic<uint32_t> pli_sent_{0};  // RTCP PLI keyframe requests
 

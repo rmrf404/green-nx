@@ -147,7 +147,7 @@ struct Settings {
     // extra latency ("Video pacing" row / "smooth" in settings.json).
     bool smooth = false;
     int sharpness = 0;  // luma sharpening: 0=Off, 1=Low, 2=Medium, 3=High
-    int debug_hud = 1;  // 0=off, 1=on: on-screen debug overlay while streaming
+    int debug_hud = 0;  // 0=off, 1=on: on-screen debug overlay while streaming
 };
 
 constexpr int kLanguageCount = 14;
@@ -283,7 +283,7 @@ Settings load_settings() {
     settings.volume = std::clamp(data.value("volume", 1.0f), 0.5f, 4.0f);
     settings.smooth = data.value("smooth", false);
     settings.sharpness = std::clamp(data.value("sharpness", 0), 0, 3);
-    settings.debug_hud = std::clamp(data.value("debug_hud", 1), 0, 1);
+    settings.debug_hud = std::clamp(data.value("debug_hud", 0), 0, 1);
     return settings;
 }
 

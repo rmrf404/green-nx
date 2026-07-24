@@ -160,7 +160,7 @@ private:
     bool color_full_ = false;
     bool warned_not_hw_ = false;
     bool logged_surface_ = false;
-    bool hud_enabled_ = true;  // draw the debug HUD overlay pass
+    bool hud_enabled_ = false;  // draw the debug HUD overlay pass
 
     // Debug HUD text (stage 1): stats composited on the CPU into a pitch-linear
     // RGBA texture, sampled by hud_fsh_ in the overlay pass.
@@ -174,7 +174,8 @@ private:
     std::vector<uint32_t> hud_pixels_;   // CPU compose buffer (kHudTexW*kHudTexH)
     std::string hud_text_cache_;         // last rasterized text (skip if unchanged)
     uint64_t fps_tick_ = 0;              // armGetSystemTick at last FPS sample
-    int fps_frames_ = 0;
+    int fps_frames_ = 0;                 // distinct frames presented this window
+    const uint8_t* fps_last_data_ = nullptr;  // last frame's surface, for dedup
     float fps_ = 0.0f;
     std::atomic<float> net_mbps_{0.0f};   // set by Engine worker, read by update_hud
     std::atomic<float> net_loss_{0.0f};
