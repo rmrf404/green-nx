@@ -21,6 +21,8 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include "../../vendor/json.hpp"
@@ -286,10 +288,12 @@ struct Settings {
     bool smooth = false;
     int sharpness = 0;  // luma sharpening: 0=Off, 1=Low, 2=Medium, 3=High
     int debug_hud = 0;  // 0=off, 1=on: on-screen debug overlay while streaming
+    int deadzone = 1;   // stick deadzone: index into kDeadzoneLabels/Values
 };
 
 constexpr int kLanguageCount = 14;
 constexpr int kVibrationLevels = 4;
+constexpr int kDeadzoneLevels = 5;
 
 Settings load_settings();
 void save_settings(const Settings& settings);
@@ -425,6 +429,8 @@ Settings load_settings() {
     settings.smooth = data.value("smooth", false);
     settings.sharpness = std::clamp(data.value("sharpness", 0), 0, 3);
     settings.debug_hud = std::clamp(data.value("debug_hud", 0), 0, 1);
+    settings.deadzone =
+        std::clamp(data.value("deadzone", 1), 0, kDeadzoneLevels - 1);
     return settings;
 }
 
@@ -439,7 +445,8 @@ void save_settings(const Settings& settings) {
                 {"volume", settings.volume},
                 {"smooth", settings.smooth},
                 {"sharpness", settings.sharpness},
-                {"debug_hud", settings.debug_hud}}.dump(2);
+                {"debug_hud", settings.debug_hud},
+                {"deadzone", settings.deadzone}}.dump(2);
 }
 
 // Streamed console's system language (BCP-47). Games without an in-game
@@ -1029,6 +1036,13 @@ const char* kQualityLabels[3] = {"720p", "1080p", "1080p high bitrate"};
 const char* kMappingLabels[2] = {"Positional (Switch A = Xbox B)",
                                  "Match labels (Switch A = Xbox A)"};
 const char* kSharpnessLabels[4] = {"Off", "Low", "Medium", "High"};
+// Deadzone as a fraction of full stick travel. Below the threshold the axis
+// reports zero; above it, travel is rescaled so the stick still reaches full
+// deflection at the edge instead of just losing its first few percent.
+const char* kDeadzoneLabels[kDeadzoneLevels] = {"Off", "Low", "Medium", "High",
+                                                "Very high"};
+const float kDeadzoneValues[kDeadzoneLevels] = {0.0f, 0.08f, 0.15f, 0.22f,
+                                                0.30f};
 
 const HomeConsole& selected_console(const App& app) {
     return app.consoles[std::clamp(
@@ -1490,6 +1504,7 @@ void draw_settings(App& app) {
          std::to_string(static_cast<int>(app.settings.volume * 100 + 0.5f)) + "%"},
         {"Video pacing", app.settings.smooth ? "Smooth" : "Standard"},
         {"Sharpness", kSharpnessLabels[app.settings.sharpness]},
+        {"Stick deadzone", kDeadzoneLabels[app.settings.deadzone]},
     };
     if (!app.consoles.empty())
         rows.push_back({"Preferred source",
@@ -1592,6 +1607,10 @@ void draw_settings(App& app) {
             line2 = "cloud bitrates. Low is subtle; High can ring on edges.";
             break;
         case 8:
+            line1 = "How far a stick must move off-center before it registers —";
+            line2 = "raise this if a stick drifts or creeps on its own at rest.";
+            break;
+        case 9:
             line1 = "Where Play launches games: xCloud (cloud servers) or";
             line2 = "remote play from your own console over your network.";
             break;
@@ -1644,7 +1663,8 @@ void draw_settings(App& app) {
 #ifdef GNX_NATIVE_STREAM
 // mapping 0: positional (Switch east button -> Xbox east button).
 // mapping 1: match labels (Switch A -> Xbox A).
-xcloud::GamepadFrame read_gamepad(SDL_Joystick* joystick, int mapping) {
+xcloud::GamepadFrame read_gamepad(SDL_Joystick* joystick, int mapping,
+                                  float deadzone) {
     xcloud::GamepadFrame frame;
     auto button = [&](int index) {
         return SDL_JoystickGetButton(joystick, index) != 0;
@@ -1680,10 +1700,17 @@ xcloud::GamepadFrame read_gamepad(SDL_Joystick* joystick, int mapping) {
     auto axis = [&](int index) {
         return SDL_JoystickGetAxis(joystick, index) / 32767.0f;
     };
-    frame.left_x = axis(0);
-    frame.left_y = axis(1);
-    frame.right_x = axis(2);
-    frame.right_y = axis(3);
+    // Radial deadzone per stick: kill drift near center, then rescale the
+    // remaining travel so full deflection still reaches 1.0 instead of
+    // starting a little short of it.
+    auto with_deadzone = [&](float x, float y) {
+        float mag = std::sqrt(x * x + y * y);
+        if (mag < deadzone || mag < 0.0001f) return std::pair<float, float>{0.0f, 0.0f};
+        float scale = std::min(1.0f, (mag - deadzone) / (1.0f - deadzone)) / mag;
+        return std::pair<float, float>{x * scale, y * scale};
+    };
+    std::tie(frame.left_x, frame.left_y) = with_deadzone(axis(0), axis(1));
+    std::tie(frame.right_x, frame.right_y) = with_deadzone(axis(2), axis(3));
     return frame;
 }
 
@@ -1869,7 +1896,8 @@ void draw_stream(App& app, SDL_Joystick* joystick) {
         }
         app.gfx.draw_texture(frame, destination);
         app.engine->send_gamepad(
-            read_gamepad(joystick, app.settings.mapping));
+            read_gamepad(joystick, app.settings.mapping,
+                        kDeadzoneValues[app.settings.deadzone]));
         apply_rumble(app);
 
         if (SDL_GetTicks() < app.stream_hint_until) {
@@ -2437,9 +2465,9 @@ int main(int argc, char** argv) {
 
             case Scene::Settings: {
                 // Row order: quality, mapping, vibration, region, language,
-                // volume, pacing, sharpness, [source when a console is
-                // linked], Debug HUD, accounts, sign out.
-                int hud_row = app.consoles.empty() ? 8 : 9;
+                // volume, pacing, sharpness, deadzone, [source when a console
+                // is linked], Debug HUD, accounts, sign out.
+                int hud_row = app.consoles.empty() ? 9 : 10;
                 int accounts_row = hud_row + 1;
                 int signout_row = hud_row + 2;
                 if (input.up)
@@ -2510,10 +2538,15 @@ int main(int argc, char** argv) {
                     else if (app.settings_cursor == 7)
                         app.settings.sharpness =
                             (app.settings.sharpness + direction + 4) % 4;
+                    else if (app.settings_cursor == 8)
+                        app.settings.deadzone =
+                            (app.settings.deadzone + direction +
+                             kDeadzoneLevels) %
+                            kDeadzoneLevels;
                     // "Preferred source" only exists with a linked console;
                     // Debug HUD sits right after it either way. Accounts and
                     // Sign out are A-rows, handled above.
-                    else if (!app.consoles.empty() && app.settings_cursor == 8)
+                    else if (!app.consoles.empty() && app.settings_cursor == 9)
                         app.settings.source =
                             (app.settings.source + direction + 3) % 3;
                     else if (app.settings_cursor == hud_row)
@@ -2692,7 +2725,8 @@ int main(int argc, char** argv) {
             Uint32 now = SDL_GetTicks();
             if (now - app.last_input_ms >= 8) {
                 app.engine->send_gamepad(
-                    read_gamepad(joystick, app.settings.mapping));
+                    read_gamepad(joystick, app.settings.mapping,
+                        kDeadzoneValues[app.settings.deadzone]));
                 apply_rumble(app);
                 app.last_input_ms = now;
             }
