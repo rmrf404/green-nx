@@ -968,9 +968,15 @@ bool Engine::run_peer(GssvSession& session) {
             // A >2 s gap in our own rounds means the app was suspended (every
             // thread froze together): skip that round instead of misreading
             // the worker's stale heartbeat.
+            // `tick` comes from the worker thread's own SDL_GetTicks64() call,
+            // which can read a few ms ahead of this thread's `now` (no shared
+            // clock guarantee across threads/cores). Without the `now > tick`
+            // guard that briefly makes tick > now, and the unsigned subtraction
+            // wraps to a huge value -- an instant false "stalled" on every
+            // stream instead of a real 10 s timeout.
             Uint64 tick = worker_tick_.load(std::memory_order_relaxed);
             if (now - prev_round <= 2000 && !stall_reported && tick &&
-                now - tick > 10000) {
+                now > tick && now - tick > 10000) {
                 stall_reported = true;
                 fail("Stream engine stalled, please start the stream again");
             }
@@ -1128,7 +1134,11 @@ bool Engine::run_peer(GssvSession& session) {
             // whole time) means the picture is not coming back on its own.
             Uint64 last_decode =
                 last_decode_ticks_.load(std::memory_order_relaxed);
-            if (last_decode && now - last_decode > 15000) {
+            // last_decode is written on the decode thread's own SDL_GetTicks64()
+            // call, not this (worker) thread's -- guard the same underflow risk
+            // as the keepalive watchdog above.
+            if (last_decode && now > last_decode &&
+                now - last_decode > 15000) {
                 fail("Video stalled for 15s, please start the stream again");
                 return true;
             }
