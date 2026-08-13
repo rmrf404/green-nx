@@ -30,6 +30,7 @@
 #include "../core/catalog.hpp"
 #include "covers.hpp"
 #include "gfx.hpp"
+#include "names.hpp"
 
 #ifdef GNX_NATIVE_STREAM
 #include "stream/engine.hpp"
@@ -355,6 +356,7 @@ struct App {
     std::vector<HintHit> hint_hits;  // footer chips recorded for touch taps
     UiSound ui_sound;
     std::unique_ptr<Covers> covers;
+    std::unique_ptr<Names> names;  // lazy name lookup for catalog search hits
     std::unique_ptr<XboxAuth> auth;
 
     Scene scene = Scene::Splash;
@@ -372,6 +374,7 @@ struct App {
     // library
     std::vector<Game> games;
     std::vector<int> visible;  // indices into games for the active tab + search
+    int playable_visible = 0;  // of those, how many can actually be launched
     std::string query;
     int cursor = 0;
     LibraryTab tab = LibraryTab::All;
@@ -487,7 +490,11 @@ void apply_region(const Settings& settings) {
 
 // ---- persistence ----------------------------------------------------------
 
-constexpr int kGamesCacheVersion = 2;  // v1 lacked boxArt: force a refresh
+// v1 lacked boxArt, v2 held only the playable titles and no availability
+// flags: both force a refresh. The v3 cache is the whole catalog (~2400
+// entries, ~300 KB), which is what search needs to answer "is this game on
+// xCloud?" without going back to the network.
+constexpr int kGamesCacheVersion = 3;
 
 void save_games_cache(const std::vector<Game>& games) {
     json list = json::array();
@@ -495,7 +502,12 @@ void save_games_cache(const std::vector<Game>& games) {
         list.push_back({{"titleId", game.title_id},
                         {"productId", game.product_id},
                         {"name", game.name},
-                        {"boxArt", game.box_art_url}});
+                        {"boxArt", game.box_art_url},
+                        {"owned", game.owned},
+                        {"sub", game.subscription},
+                        {"mySub", game.in_subscription},
+                        {"ads", game.ad_supported},
+                        {"maxSession", game.max_session_secs}});
     std::ofstream out(user_path("games.json"), std::ios::trunc);
     out << json{{"version", kGamesCacheVersion}, {"games", list}}.dump();
 }
@@ -514,6 +526,11 @@ std::vector<Game> load_games_cache() {
         game.product_id = entry.value("productId", "");
         game.name = entry.value("name", "");
         game.box_art_url = entry.value("boxArt", "");
+        game.owned = entry.value("owned", false);
+        game.subscription = entry.value("sub", false);
+        game.in_subscription = entry.value("mySub", false);
+        game.ad_supported = entry.value("ads", false);
+        game.max_session_secs = entry.value("maxSession", 0);
         if (!game.title_id.empty()) games.push_back(std::move(game));
     }
     return games;
@@ -629,6 +646,8 @@ void start_signin(App& app) {
 void start_library_load(App& app, bool force_refresh) {
     app.load_state = 0;
     app.status = "Connecting to Xbox...";
+    // Pending lookups belong to the library we are about to replace.
+    if (app.names) app.names->reset();
     app.worker = std::thread([&app, force_refresh] {
         try {
             if (!force_refresh) {
@@ -668,13 +687,28 @@ void start_library_load(App& app, bool force_refresh) {
                 std::fprintf(f, "%s\n", console_log.c_str());
                 std::fclose(f);
             }
-            std::vector<Game> games =
-                fetch_playable_titles(http, credentials.cloud);
+            // The backend hands over its whole catalog (~2400 titles), not
+            // just what this account can play. Keep all of it: the library
+            // grid still lists only the playable ones, but search can then
+            // say what a title would need instead of "nothing found".
+            std::vector<Game> games = fetch_catalog(http, credentials.cloud);
+            std::vector<Game*> playable;
+            for (Game& game : games)
+                if (game.playable()) playable.push_back(&game);
             app.status = "Resolving names and covers (" +
+                         std::to_string(playable.size()) + " of " +
                          std::to_string(games.size()) + " titles)...";
-            fetch_names(http, games);
+            // Only the playable ones: the full catalog would be ~130 MB of
+            // store metadata. The rest resolve lazily as search surfaces them.
+            fetch_names(http, playable);
+            // Playable first, alphabetically -- that block is the library
+            // grid. Catalog-only titles follow, ordered by id, and are only
+            // ever reached through search.
             std::sort(games.begin(), games.end(),
                       [](const Game& a, const Game& b) {
+                          if (a.playable() != b.playable())
+                              return a.playable();
+                          if (!a.playable()) return a.title_id < b.title_id;
                           const std::string& left =
                               a.name.empty() ? a.title_id : a.name;
                           const std::string& right =
@@ -729,6 +763,7 @@ void switch_account(App& app, const std::string& id) {
     app.games.clear();
     app.visible.clear();
     app.consoles.clear();
+    if (app.names) app.names->reset();  // lookups belong to the old account
     app.favorites = load_id_list("favorites.json");
     app.history = load_id_list("history.json");
     app.gamertag.clear();
@@ -759,13 +794,18 @@ void add_account(App& app) {
     switch_account(app, g_accounts.back().id);
 }
 
+// Rebuild `visible` for the active tab and query.
+//
+// Without a query the grid is the playable library, exactly as before. With
+// one, the search also reaches the titles this account cannot play: those hit
+// the grid after the playable matches, flagged with what they would need
+// (#41). Matching runs on search_key(), so "forza horizon" finds
+// FORZAHORIZON5 whether or not its store name has been resolved yet.
 void apply_filter(App& app) {
     app.visible.clear();
-    std::string needle = lowercase(app.query);
+    std::string needle = search_key(app.query);
     auto matches = [&](const Game& game) {
-        return needle.empty() ||
-               lowercase(game.name).find(needle) != std::string::npos ||
-               lowercase(game.title_id).find(needle) != std::string::npos;
+        return matches_query(game, needle);
     };
 
     if (app.tab == LibraryTab::Consoles) {
@@ -777,14 +817,25 @@ void apply_filter(App& app) {
         }
     } else {
         for (int i = 0; i < static_cast<int>(app.games.size()); ++i) {
-            if (app.tab == LibraryTab::Favorites &&
-                !is_favorite(app, app.games[i].title_id))
+            const Game& game = app.games[i];
+            // Catalog-only titles are search results, never browsable rows:
+            // with no query they would bury the library under ~2400 cards.
+            // Favorites are exempt -- pinning one is an explicit choice, and
+            // a game that vanishes the moment you star it reads as a bug.
+            if (!game.playable() && needle.empty() &&
+                app.tab != LibraryTab::Favorites)
                 continue;
-            if (matches(app.games[i])) app.visible.push_back(i);
+            if (app.tab == LibraryTab::Favorites &&
+                !is_favorite(app, game.title_id))
+                continue;
+            if (matches(game)) app.visible.push_back(i);
         }
     }
     app.cursor = std::min(app.cursor,
                           std::max(0, static_cast<int>(app.visible.size()) - 1));
+    app.playable_visible = 0;
+    for (int i : app.visible)
+        if (app.games[i].playable()) ++app.playable_visible;
 }
 
 std::string keyboard_input(const std::string& initial) {
@@ -1101,6 +1152,33 @@ void draw_loading(App& app) {
                           gfx::FontSize::Note, gfx::kTextDim);
 }
 
+// What a search hit the account cannot launch would need, in two words for
+// the card corner. Playable titles never show one -- the whole grid is theirs.
+const char* availability_badge(const Game& game) {
+    if (game.ad_supported) return "Free · ads";
+    if (game.subscription) return "Game Pass";
+    return "Unavailable";
+}
+
+// The same answer with room to breathe, for the detail screen's meta chips.
+// A title can qualify several ways at once, so this fills a small list.
+std::vector<std::pair<std::string, gfx::Color>> availability_chips(
+    const Game& game) {
+    std::vector<std::pair<std::string, gfx::Color>> chips;
+    if (game.owned) chips.push_back({"You own it", gfx::kFocus});
+    if (game.in_subscription)
+        chips.push_back({"In your Game Pass", gfx::kFocus});
+    else if (game.subscription)
+        chips.push_back({"Needs Game Pass", gfx::kWarn});
+    // The session cap that comes with ad-supported play is spelled out in the
+    // footnote instead: chips share one row with quality and favorite, and a
+    // title can be owned, in the catalog and ad-supported all at once.
+    if (game.ad_supported) chips.push_back({"Ad-supported", gfx::kWarn});
+    if (chips.empty())
+        chips.push_back({"Not available to this account", gfx::kError});
+    return chips;
+}
+
 // One library card. The focused card scales 1.08x (230x345 -> 248x372,
 // centered), gets border+glow and a name plate under it (card 1a layer 1+4).
 void draw_card(App& app, const Game& game, const SDL_Rect& card,
@@ -1108,11 +1186,30 @@ void draw_card(App& app, const Game& game, const SDL_Rect& card,
     SDL_Rect dst = card;
     if (focused) dst = {card.x - 9, card.y - 13, kCardW + 18, kCardH + 27};
 
+    // Catalog hits arrive with an id and nothing else; resolve the name (and
+    // with it the box art) for the cards actually on screen, like covers do.
+    if (game.name.empty()) app.names->request(game);
+
     SDL_Texture* cover = app.covers->get(game.title_id, game.box_art_url);
     if (cover)
         app.gfx.draw_texture(cover, dst);
     else
         draw_cover_fallback(app, game, dst, gfx::FontSize::Huge);
+
+    // A search hit this account cannot launch is dimmed and labelled with
+    // what it would take, so the grid never mixes "play this" with "you
+    // can't play this" silently (#41).
+    if (!game.playable()) {
+        app.gfx.fill(dst, {gfx::kBg.r, gfx::kBg.g, gfx::kBg.b, 150});
+        const char* badge = availability_badge(game);
+        SDL_Rect plate = {dst.x, dst.y + dst.h - 44, dst.w, 44};
+        app.gfx.fill(plate, gfx::kBar);
+        app.gfx.text_centered(badge, plate.x + plate.w / 2, plate.y + 8,
+                              gfx::FontSize::Small,
+                              game.subscription || game.ad_supported
+                                  ? gfx::kWarn
+                                  : gfx::kError);
+    }
 
     if (is_favorite(app, game.title_id)) {
         SDL_Rect badge = {dst.x + 8, dst.y + 8, 44, 44};
@@ -1247,7 +1344,14 @@ void draw_library(App& app) {
     }
 
     std::string info = std::to_string(app.visible.size()) + " games";
-    if (!app.query.empty()) info += "  ·  \"" + app.query + "\"";
+    if (!app.query.empty()) {
+        // With a query the count mixes the library with the wider catalog;
+        // spell the split out instead of implying they are all playable.
+        int extra = static_cast<int>(app.visible.size()) - app.playable_visible;
+        info = std::to_string(app.playable_visible) + " playable";
+        if (extra > 0) info += "  ·  " + std::to_string(extra) + " in catalog";
+        info += "  ·  \"" + app.query + "\"";
+    }
     app.gfx.text(info,
                  gfx::kWidth - kGridX -
                      app.gfx.text_width(info, gfx::FontSize::Small),
@@ -1255,9 +1359,12 @@ void draw_library(App& app) {
 
     if (app.visible.empty()) {
         if (!app.query.empty())
+            // Searching the whole catalog turns "nothing found" into a real
+            // answer: the title is not on xCloud at all (#41).
             draw_empty_state(app, "", gfx::kText,
-                             "Nothing found for \"" + app.query + "\"",
-                             "Press", "Y", "to search again");
+                             "\"" + app.query + "\" isn't on Xbox Cloud Gaming",
+                             "Not with Game Pass or as a game you own · press",
+                             "Y", "to search again");
         else if (app.tab == LibraryTab::Favorites)
             draw_empty_state(app, "★", gfx::kWarn, "No favorites yet",
                              "Press", "X", "on any game to pin it here");
@@ -1310,6 +1417,7 @@ void draw_detail(App& app) {
         app.detail_index >= static_cast<int>(app.games.size()))
         return;
     const Game& game = app.games[app.detail_index];
+    if (game.name.empty()) app.names->request(game);
 
     SDL_Rect cover_rect = {kGridX, 120, 520, 780};
     SDL_Texture* cover = app.covers->get(game.title_id, game.box_art_url);
@@ -1338,8 +1446,10 @@ void draw_detail(App& app) {
         app.gfx.text(label, cx2 + 18, 238, gfx::FontSize::Small, color);
         cx2 += w + 20;
     };
-    meta_chip("Xbox Cloud Gaming", gfx::kTextDim);
-    meta_chip(kQualityLabels[app.settings.quality], gfx::kTextDim);
+    for (const auto& [label, color] : availability_chips(game))
+        meta_chip(label, color);
+    if (game.playable())
+        meta_chip(kQualityLabels[app.settings.quality], gfx::kTextDim);
     if (fav) meta_chip("★ Favorite", gfx::kWarn);
 
     // Action buttons, 640 wide. Buttons don't scale on focus — only
@@ -1347,9 +1457,13 @@ void draw_detail(App& app) {
     // drawn only with a linked console (card 1f visibility rule).
     const char* fav_label = fav ? "★ Remove favorite" : "★ Add favorite";
     SDL_Rect play = {rx, 400, 640, 96};
-    app.gfx.fill(play, gfx::kAccent);
-    app.gfx.text_centered("Play", play.x + 320, play.y + 24,
-                          gfx::FontSize::Body, gfx::kText);
+    // Search reaches titles the account cannot stream; the button says so
+    // rather than starting a session that the backend would refuse.
+    bool can_play = game.playable();
+    app.gfx.fill(play, can_play ? gfx::kAccent : gfx::kSurface);
+    app.gfx.text_centered(can_play ? "Play" : "Can't play this yet",
+                          play.x + 320, play.y + 24, gfx::FontSize::Body,
+                          can_play ? gfx::kText : gfx::kTextDim);
     SDL_Rect favbtn = {rx, 520, 640, 96};
     app.gfx.fill(favbtn, gfx::kSurface);
     app.gfx.text_centered(fav_label, favbtn.x + 320, favbtn.y + 24,
@@ -1372,9 +1486,20 @@ void draw_detail(App& app) {
                                                 : source;
     draw_focus_frames(app, focused);
 
-    app.gfx.text("Streams in your account's language · change in Settings",
-                 rx, app.consoles.empty() ? 680 : 792, gfx::FontSize::Small,
-                 gfx::kFaint);
+    std::string note;
+    if (game.playable())
+        note = "Streams in your account's language · change in Settings";
+    else if (game.ad_supported)
+        note = "Ad-supported streaming isn't wired up on the console yet";
+    else if (game.subscription)
+        note = "Included with Game Pass — this account has no plan covering it";
+    else
+        note = "This title isn't streamable from Xbox Cloud Gaming";
+    if (game.ad_supported && game.max_session_secs > 0)
+        note += " · " + std::to_string(game.max_session_secs / 60) +
+                "-minute sessions";
+    app.gfx.text(note, rx, app.consoles.empty() ? 680 : 792,
+                 gfx::FontSize::Small, gfx::kFaint);
 
     draw_hints(app, {{"A", "Select", true}, {"B", "Back"}});
 }
@@ -2200,6 +2325,7 @@ int main(int argc, char** argv) {
     app.ui_sound.init();  // menu navigation ticks (best-effort; ignored on fail)
     SDL_Joystick* joystick = SDL_JoystickOpen(0);
     app.covers = std::make_unique<Covers>(app.gfx, data_path("covers"));
+    app.names = std::make_unique<Names>();
     load_accounts();  // registry + migration; sets the active account
     app.auth = std::make_unique<XboxAuth>(user_path("tokens.json"));
     app.auth->set_abort_flag(&app.abort_http);
@@ -2473,7 +2599,7 @@ int main(int argc, char** argv) {
                         // Cycle the preferred source: Ask -> xCloud -> Xbox.
                         app.settings.source = (app.settings.source + 1) % 3;
                         save_settings(app.settings);
-                    } else {
+                    } else if (game.playable()) {
                         app.launch_game = game;
                         push_history(app, app.launch_game.title_id);
                         if (!app.consoles.empty() &&
@@ -2799,6 +2925,8 @@ int main(int argc, char** argv) {
             app.ui_sound.play(1.0f);
 
         app.covers->pump();
+        // A resolved name can change what the query matches, so re-filter.
+        if (app.names->pump(app.games)) apply_filter(app);
         app.gfx.begin_frame();
         switch (app.scene) {
             case Scene::Splash: draw_splash(app); break;
@@ -2847,6 +2975,7 @@ int main(int argc, char** argv) {
     breadcrumb("webrtc shut down");
 #endif
     app.covers.reset();
+    app.names.reset();
     breadcrumb("covers stopped");
     // Every libcurl handle has to be gone before socketExit(). A handle keeps
     // its TLS connections open in its own cache, and socketExit() closes bsd:u

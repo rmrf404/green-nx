@@ -1,6 +1,7 @@
 #include "catalog.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -53,8 +54,7 @@ std::vector<HomeConsole> fetch_home_consoles(
     return consoles;
 }
 
-std::vector<Game> fetch_playable_titles(Http& http,
-                                        const EndpointCredentials& cloud) {
+std::vector<Game> fetch_catalog(Http& http, const EndpointCredentials& cloud) {
     HttpResponse response =
         http.get(cloud.host + "/v2/titles",
                  {"Accept: application/json",
@@ -73,19 +73,30 @@ std::vector<Game> fetch_playable_titles(Http& http,
         if (title_id.empty()) continue;
 
         const json details = entry.value("details", json::object());
-        bool playable = details.value("hasEntitlement", false);
-        if (!playable) {
-            const json programs = details.value("programs", json::array());
-            const json subs = details.value("userSubscriptions", json::array());
-            for (const json& program : programs)
-                for (const json& sub : subs)
-                    if (program == sub) { playable = true; break; }
-        }
-        if (!playable) continue;
-
         Game game;
         game.title_id = title_id;
         game.product_id = details.value("productId", "");
+        game.owned = details.value("hasEntitlement", false);
+        game.max_session_secs = details.value("maxSessionLengthInSeconds", 0);
+
+        // "programs" lists what the title is offered under, "userSubscriptions"
+        // what the account holds; their intersection is Game Pass access. The
+        // subscription programs are backend codenames (GPULTIMATE, CALLISTO,
+        // DIA, EUROPA, TRITON, FERDINAND, IO, GANYMEDE...) and new ones appear
+        // over time, so anything that is not one of the known non-subscription
+        // programs counts as one rather than matching a hardcoded list.
+        const json programs = details.value("programs", json::array());
+        const json subs = details.value("userSubscriptions", json::array());
+        for (const json& program : programs) {
+            if (!program.is_string()) continue;
+            const std::string name = program.get<std::string>();
+            if (name == "F2P") game.ad_supported = true;
+            else if (name != "BYOG" && name != "EARLYACCESS")
+                game.subscription = true;
+            for (const json& sub : subs)
+                if (program == sub) game.in_subscription = true;
+        }
+
         games.push_back(std::move(game));
     }
 
@@ -99,13 +110,38 @@ std::vector<Game> fetch_playable_titles(Http& http,
     return games;
 }
 
+std::string search_key(const std::string& text) {
+    std::string key;
+    key.reserve(text.size());
+    for (unsigned char c : text)
+        if (std::isalnum(c)) key += static_cast<char>(std::tolower(c));
+    return key;
+}
+
+bool matches_query(const Game& game, const std::string& query_key) {
+    if (query_key.empty()) return true;
+    return search_key(game.name).find(query_key) != std::string::npos ||
+           search_key(game.title_id).find(query_key) != std::string::npos;
+}
+
 void fetch_names(Http& http, std::vector<Game>& games,
                  const std::string& market, const std::string& language) {
-    // displaycatalog accepts comma-separated bigIds; keep batches modest.
+    std::vector<Game*> pointers;
+    pointers.reserve(games.size());
+    for (Game& game : games) pointers.push_back(&game);
+    fetch_names(http, pointers, market, language);
+}
+
+void fetch_names(Http& http, const std::vector<Game*>& games,
+                 const std::string& market, const std::string& language) {
+    // displaycatalog accepts comma-separated bigIds; keep batches modest --
+    // the Details template runs to ~53 KB per product, so 20 already means a
+    // ~1 MB response to hold in memory on the console.
     constexpr size_t kBatch = 20;
     std::unordered_map<std::string, Game*> by_product;
-    for (Game& game : games)
-        if (!game.product_id.empty()) by_product[game.product_id] = &game;
+    for (Game* game : games)
+        if (!game->product_id.empty() && game->name.empty())
+            by_product[game->product_id] = game;
 
     std::vector<std::string> ids;
     ids.reserve(by_product.size());

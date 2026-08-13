@@ -13,7 +13,10 @@ involved.
 
 - Microsoft **device-code sign-in** (no password typed on console); tokens
   cached on SD
-- **Game library** with box-art covers, search, quality settings
+- **Game library** with box-art covers, quality settings, and search that
+  covers the **whole xCloud catalog** — titles you cannot stream yet are
+  flagged with what they need (Game Pass, ad-supported), and a game that is
+  not on xCloud at all says so instead of "nothing found"
 - **Native WebRTC streaming**: ICE (Teredo), DTLS-SRTP, SCTP data channels,
   RTP video/audio, NACK/PLI recovery — implemented on-console
 - **Hardware H.264 decoding** (NVDEC via FFmpeg's NVTEGRA hwaccel) with
@@ -60,7 +63,13 @@ docker run --rm -v "$PWD":/src -w /src devkitpro/devkita64 make
 
 The result is `green-nx.nro`. A small desktop harness
 (`make -f Makefile.pc`) builds the core (auth/catalog/signaling) for
-development on a PC.
+development on a PC:
+
+```sh
+./build/pc/greennx login            # device-code sign-in
+./build/pc/greennx games            # the playable library, with names
+./build/pc/greennx search cyberpunk # the whole catalog, with availability
+```
 
 ### Layout
 
