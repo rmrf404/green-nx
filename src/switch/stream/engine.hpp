@@ -58,8 +58,12 @@ public:
     // exit, after every Engine is gone; no Engine may be created afterwards.
     static void global_shutdown();
 
+    // ad_supported picks the xgpuwebf2p offering instead of the regular
+    // cloud one: that is how a title streams without a Game Pass plan (with
+    // ads, and with the server-side session cap that comes with it).
     void start(const std::string& title_id, QualityTier tier,
-               const std::string& locale = "en-US");
+               const std::string& locale = "en-US",
+               bool ad_supported = false);
     // Remote play from your own console (xhome offering): the target is the
     // console's serverId; the game is whatever the console runs.
     void start_home(const std::string& server_id, QualityTier tier,
@@ -163,6 +167,7 @@ private:
     EndpointCredentials cloud_;
     std::string title_id_;
     std::string home_server_id_;  // non-empty selects the home (xhome) path
+    bool ad_supported_ = false;   // selects the xgpuwebf2p offering
     QualityTier tier_ = QualityTier::P1080HQ;
     std::string locale_ = "en-US";  // streamed console's system language
     float audio_gain_ = 1.0f;       // forwarded to AudioPlayer::set_gain

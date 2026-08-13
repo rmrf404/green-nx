@@ -97,6 +97,14 @@ std::vector<Game> fetch_catalog(Http& http, const EndpointCredentials& cloud) {
                 if (program == sub) game.in_subscription = true;
         }
 
+        // "userPrograms" is what the account holds, as opposed to what the
+        // title is offered under. F2P here means this account may stream it
+        // ad-supported -- the cloud offering reports it empty, the f2p one
+        // fills it in, which is why both catalogs have to be fetched.
+        for (const json& program : details.value("userPrograms", json::array()))
+            if (program.is_string() && program.get<std::string>() == "F2P")
+                game.ad_granted = true;
+
         games.push_back(std::move(game));
     }
 
@@ -108,6 +116,44 @@ std::vector<Game> fetch_catalog(Http& http, const EndpointCredentials& cloud) {
                             }),
                 games.end());
     return games;
+}
+
+void merge_ad_supported(std::vector<Game>& catalog,
+                        const std::vector<Game>& ads) {
+    std::unordered_map<std::string, Game*> by_title;
+    for (Game& game : catalog) by_title[game.title_id] = &game;
+
+    std::vector<Game> extras;
+    for (const Game& ad : ads) {
+        // Everything the offering hands back is ad-supported by definition,
+        // but only what the account is entitled to there will actually start.
+        if (!ad.owned && !ad.in_subscription && !ad.ad_granted) continue;
+
+        auto found = by_title.find(ad.title_id);
+        if (found == by_title.end()) {
+            Game game = ad;
+            game.ad_supported = true;
+            game.ad_playable = true;
+            // The offering answers only for itself: whether the same title is
+            // owned or covered by a plan is the cloud catalog's business, and
+            // it does not list this one at all.
+            game.owned = false;
+            game.in_subscription = false;
+            extras.push_back(std::move(game));
+            continue;
+        }
+        found->second->ad_supported = true;
+        found->second->ad_playable = true;
+        found->second->ad_granted = ad.ad_granted;
+        if (ad.max_session_secs > 0)
+            found->second->max_session_secs = ad.max_session_secs;
+    }
+
+    catalog.insert(catalog.end(), extras.begin(), extras.end());
+    std::sort(catalog.begin(), catalog.end(),
+              [](const Game& a, const Game& b) {
+                  return a.title_id < b.title_id;
+              });
 }
 
 std::string search_key(const std::string& text) {

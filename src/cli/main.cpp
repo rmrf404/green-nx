@@ -56,6 +56,17 @@ int cmd_whoami(gnx::XboxAuth& auth) {
     return 0;
 }
 
+// The catalog as the library sees it: the cloud offering, plus whatever the
+// ad-supported one will stream to this account folded in.
+std::vector<gnx::Game> load_catalog(gnx::Http& http,
+                                    const gnx::StreamingCredentials& creds) {
+    std::vector<gnx::Game> catalog = gnx::fetch_catalog(http, creds.cloud);
+    if (creds.cloud_f2p)
+        gnx::merge_ad_supported(catalog,
+                                gnx::fetch_catalog(http, *creds.cloud_f2p));
+    return catalog;
+}
+
 // How the account can reach a title, in the same words the library uses.
 std::string availability(const gnx::Game& game) {
     std::string label;
@@ -65,8 +76,10 @@ std::string availability(const gnx::Game& game) {
     };
     if (game.owned) add("owned");
     if (game.in_subscription) add("in your Game Pass");
-    else if (game.subscription) add("needs Game Pass");
-    if (game.ad_supported) add("ad-supported");
+    else if (game.subscription && !game.needs_ad_offering())
+        add("needs Game Pass");
+    if (game.needs_ad_offering()) add("free with ads");
+    else if (game.ad_supported) add("ad-supported");
     return label.empty() ? "unavailable" : label;
 }
 
@@ -76,7 +89,7 @@ int cmd_games(gnx::XboxAuth& auth, bool with_names) {
     std::printf("Cloud endpoint: %s\n", credentials.cloud.host.c_str());
 
     gnx::Http http;
-    std::vector<gnx::Game> catalog = gnx::fetch_catalog(http, credentials.cloud);
+    std::vector<gnx::Game> catalog = load_catalog(http, credentials);
     std::vector<gnx::Game*> playable;
     for (gnx::Game& game : catalog)
         if (game.playable()) playable.push_back(&game);
@@ -103,7 +116,7 @@ int cmd_games(gnx::XboxAuth& auth, bool with_names) {
 int cmd_search(gnx::XboxAuth& auth, const std::string& query) {
     gnx::StreamingCredentials credentials = auth.fetch_streaming_credentials();
     gnx::Http http;
-    std::vector<gnx::Game> catalog = gnx::fetch_catalog(http, credentials.cloud);
+    std::vector<gnx::Game> catalog = load_catalog(http, credentials);
 
     std::string key = gnx::search_key(query);
     if (key.empty()) {
@@ -141,16 +154,28 @@ int cmd_search(gnx::XboxAuth& auth, const std::string& query) {
 // Exercises the session signaling end to end (minus WebRTC): create a
 // session with the high-quality (tizen) fingerprint, wait for provisioning,
 // authenticate the connection, then tear it down.
-int cmd_stream_test(gnx::XboxAuth& auth, const std::string& title_id) {
+int cmd_stream_test(gnx::XboxAuth& auth, const std::string& title_id,
+                    bool ad_supported) {
     std::printf("Fetching streaming credentials...\n");
     gnx::StreamingCredentials credentials = auth.fetch_streaming_credentials();
     gnx::Http http;
 
-    std::printf("Cleaning up stale sessions...\n");
-    gnx::GssvSession::cleanup_stale_sessions(http, credentials.cloud);
+    // Ad-supported titles only start against the xgpuwebf2p offering, so the
+    // harness has to be able to aim at it -- that path is otherwise only
+    // reachable from the console.
+    if (ad_supported && !credentials.cloud_f2p) {
+        std::printf("This account has no ad-supported offering.\n");
+        return 1;
+    }
+    const gnx::EndpointCredentials& endpoint =
+        ad_supported ? *credentials.cloud_f2p : credentials.cloud;
+    std::printf("Offering: %s\n", ad_supported ? "xgpuwebf2p (ads)"
+                                               : "xgpuweb");
 
-    gnx::GssvSession session(http, credentials.cloud,
-                             gnx::QualityTier::P1080HQ);
+    std::printf("Cleaning up stale sessions...\n");
+    gnx::GssvSession::cleanup_stale_sessions(http, endpoint);
+
+    gnx::GssvSession session(http, endpoint, gnx::QualityTier::P1080HQ);
     std::printf("Starting session for %s (1080p HQ tier)...\n",
                 title_id.c_str());
     session.start_cloud(title_id);
@@ -212,13 +237,14 @@ int main(int argc, char** argv) {
             return cmd_search(auth, query);
         }
         if (command == "stream-test" && argc > 2)
-            return cmd_stream_test(auth, argv[2]);
+            return cmd_stream_test(auth, argv[2],
+                                   argc > 3 && std::string(argv[3]) == "--ads");
     } catch (const std::exception& error) {
         std::fprintf(stderr, "error: %s\n", error.what());
         return 1;
     }
     std::printf(
         "usage: greennx <login|logout|whoami|games|ids|search <QUERY>|"
-        "stream-test <TITLEID>>\n");
+        "stream-test <TITLEID> [--ads]>\n");
     return 2;
 }

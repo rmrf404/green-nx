@@ -23,13 +23,17 @@ involved.
   **zero-copy GPU rendering** (deko3d) — the decoded surface goes straight
   from the decoder to the screen
 - Opus audio, 60 fps video, three quality tiers (720p / 1080p / 1080p HQ)
+- **Ad-supported streaming** for free-to-play titles: no subscription needed,
+  streamed from Microsoft's ad-supported offering (sessions are capped by the
+  server, and the console tells you before you start)
 
 ## Requirements
 
 - A Nintendo Switch running the [Atmosphère](https://github.com/Atmosphere-NX/Atmosphere) custom firmware
-- An active **Xbox Game Pass** subscription — every tier (Essential, Premium,
-  Ultimate) includes Cloud Gaming; Ultimate streams the largest catalog at the
-  highest quality
+- An **Xbox Game Pass** subscription for the subscription catalog — every tier
+  (Essential, Premium, Ultimate) includes Cloud Gaming; Ultimate streams the
+  largest catalog at the highest quality. Games you already own stream without
+  one, and so do free-to-play titles offered with ads
 - A 5 GHz Wi-Fi connection is recommended
 
 ## Install
@@ -69,6 +73,7 @@ development on a PC:
 ./build/pc/greennx login            # device-code sign-in
 ./build/pc/greennx games            # the playable library, with names
 ./build/pc/greennx search cyberpunk # the whole catalog, with availability
+./build/pc/greennx stream-test FORTNITE --ads   # ad-supported offering
 ```
 
 ### Layout

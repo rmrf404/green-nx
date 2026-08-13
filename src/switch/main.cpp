@@ -491,10 +491,10 @@ void apply_region(const Settings& settings) {
 // ---- persistence ----------------------------------------------------------
 
 // v1 lacked boxArt, v2 held only the playable titles and no availability
-// flags: both force a refresh. The v3 cache is the whole catalog (~2400
-// entries, ~300 KB), which is what search needs to answer "is this game on
-// xCloud?" without going back to the network.
-constexpr int kGamesCacheVersion = 3;
+// flags, v3 predates the ad-supported offering: all force a refresh. The
+// cache is the whole catalog (~2400 entries, ~300 KB), which is what search
+// needs to answer "is this game on xCloud?" without going back to the network.
+constexpr int kGamesCacheVersion = 4;
 
 void save_games_cache(const std::vector<Game>& games) {
     json list = json::array();
@@ -507,6 +507,8 @@ void save_games_cache(const std::vector<Game>& games) {
                         {"sub", game.subscription},
                         {"mySub", game.in_subscription},
                         {"ads", game.ad_supported},
+                        {"adsGranted", game.ad_granted},
+                        {"adsPlayable", game.ad_playable},
                         {"maxSession", game.max_session_secs}});
     std::ofstream out(user_path("games.json"), std::ios::trunc);
     out << json{{"version", kGamesCacheVersion}, {"games", list}}.dump();
@@ -530,6 +532,8 @@ std::vector<Game> load_games_cache() {
         game.subscription = entry.value("sub", false);
         game.in_subscription = entry.value("mySub", false);
         game.ad_supported = entry.value("ads", false);
+        game.ad_granted = entry.value("adsGranted", false);
+        game.ad_playable = entry.value("adsPlayable", false);
         game.max_session_secs = entry.value("maxSession", 0);
         if (!game.title_id.empty()) games.push_back(std::move(game));
     }
@@ -692,6 +696,18 @@ void start_library_load(App& app, bool force_refresh) {
             // grid still lists only the playable ones, but search can then
             // say what a title would need instead of "nothing found".
             std::vector<Game> games = fetch_catalog(http, credentials.cloud);
+            // The ad-supported offering is a separate catalog with its own
+            // entitlements; without it an account with no Game Pass plan has
+            // no way to know what it can stream for free. Non-fatal: the
+            // offering is missing for plenty of accounts and regions.
+            if (credentials.cloud_f2p) {
+                try {
+                    merge_ad_supported(
+                        games, fetch_catalog(http, *credentials.cloud_f2p));
+                } catch (const std::exception&) {
+                    // Leave the cloud catalog as it is.
+                }
+            }
             std::vector<Game*> playable;
             for (Game& game : games)
                 if (game.playable()) playable.push_back(&game);
@@ -1131,7 +1147,8 @@ void launch_stream(App& app, bool home) {
     if (app.launching_home)
         app.engine->start_home(selected_console(app).server_id, tier, locale);
     else
-        app.engine->start(app.launch_game.title_id, tier, locale);
+        app.engine->start(app.launch_game.title_id, tier, locale,
+                          app.launch_game.needs_ad_offering());
     app.stream_hint_until = SDL_GetTicks() + 8000;
     app.scene = Scene::Stream;
 #endif
@@ -1152,8 +1169,9 @@ void draw_loading(App& app) {
                           gfx::FontSize::Note, gfx::kTextDim);
 }
 
-// What a search hit the account cannot launch would need, in two words for
-// the card corner. Playable titles never show one -- the whole grid is theirs.
+// How a card streams, in two words for its bottom edge. Only shown when the
+// answer is not the obvious one: either the account cannot launch it, or it
+// launches ad-supported rather than from the library proper.
 const char* availability_badge(const Game& game) {
     if (game.ad_supported) return "Free · ads";
     if (game.subscription) return "Game Pass";
@@ -1168,12 +1186,17 @@ std::vector<std::pair<std::string, gfx::Color>> availability_chips(
     if (game.owned) chips.push_back({"You own it", gfx::kFocus});
     if (game.in_subscription)
         chips.push_back({"In your Game Pass", gfx::kFocus});
-    else if (game.subscription)
+    else if (game.subscription && !game.needs_ad_offering())
+        // A title you can already stream free with ads is not "missing" a
+        // subscription; leading with what it needs would just be wrong.
         chips.push_back({"Needs Game Pass", gfx::kWarn});
     // The session cap that comes with ad-supported play is spelled out in the
     // footnote instead: chips share one row with quality and favorite, and a
     // title can be owned, in the catalog and ad-supported all at once.
-    if (game.ad_supported) chips.push_back({"Ad-supported", gfx::kWarn});
+    if (game.ad_supported)
+        chips.push_back({game.needs_ad_offering() ? "Free with ads"
+                                                  : "Ad-supported",
+                         gfx::kWarn});
     if (chips.empty())
         chips.push_back({"Not available to this account", gfx::kError});
     return chips;
@@ -1198,9 +1221,11 @@ void draw_card(App& app, const Game& game, const SDL_Rect& card,
 
     // A search hit this account cannot launch is dimmed and labelled with
     // what it would take, so the grid never mixes "play this" with "you
-    // can't play this" silently (#41).
-    if (!game.playable()) {
-        app.gfx.fill(dst, {gfx::kBg.r, gfx::kBg.g, gfx::kBg.b, 150});
+    // can't play this" silently (#41). Ad-supported titles are playable, so
+    // they keep their colour but still say how they stream.
+    if (!game.playable() || game.needs_ad_offering()) {
+        if (!game.playable())
+            app.gfx.fill(dst, {gfx::kBg.r, gfx::kBg.g, gfx::kBg.b, 150});
         const char* badge = availability_badge(game);
         SDL_Rect plate = {dst.x, dst.y + dst.h - 44, dst.w, 44};
         app.gfx.fill(plate, gfx::kBar);
@@ -1487,17 +1512,19 @@ void draw_detail(App& app) {
     draw_focus_frames(app, focused);
 
     std::string note;
-    if (game.playable())
+    if (game.needs_ad_offering())
+        note = "Streams free with ads";
+    else if (game.playable())
         note = "Streams in your account's language · change in Settings";
-    else if (game.ad_supported)
-        note = "Ad-supported streaming isn't wired up on the console yet";
     else if (game.subscription)
         note = "Included with Game Pass — this account has no plan covering it";
     else
         note = "This title isn't streamable from Xbox Cloud Gaming";
-    if (game.ad_supported && game.max_session_secs > 0)
-        note += " · " + std::to_string(game.max_session_secs / 60) +
-                "-minute sessions";
+    // The cap is the server's, not ours: an ad-supported session is cut at
+    // maxSessionLengthInSeconds, so say it before the stream starts.
+    if (game.needs_ad_offering() && game.max_session_secs > 0)
+        note += " · sessions end after " +
+                std::to_string(game.max_session_secs / 60) + " minutes";
     app.gfx.text(note, rx, app.consoles.empty() ? 680 : 792,
                  gfx::FontSize::Small, gfx::kFaint);
 

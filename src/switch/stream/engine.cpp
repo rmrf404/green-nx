@@ -125,14 +125,16 @@ void Engine::log(const std::string& line) {
 }
 
 void Engine::start(const std::string& title_id, QualityTier tier,
-                   const std::string& locale) {
+                   const std::string& locale, bool ad_supported) {
     home_server_id_.clear();
+    ad_supported_ = ad_supported;
     start_common(title_id, tier, locale);
 }
 
 void Engine::start_home(const std::string& server_id, QualityTier tier,
                         const std::string& locale) {
     home_server_id_ = server_id;
+    ad_supported_ = false;
     start_common("(your console)", tier, locale);
 }
 
@@ -615,7 +617,23 @@ void Engine::worker() {
                         : "Signing in to xCloud...");
         log("fetching streaming credentials");
         StreamingCredentials creds = auth_.fetch_streaming_credentials();
-        cloud_ = home ? creds.home : creds.cloud;
+        // Ad-supported titles live in their own offering and will not start
+        // against the regular cloud token, so a missing f2p login has to be
+        // its own failure rather than a silent fall back to a session the
+        // backend would refuse.
+        if (ad_supported_ && !home && !creds.cloud_f2p) {
+            log("xgpuwebf2p login unavailable");
+            fail("Ad-supported streaming is not available for this account");
+            return;
+        }
+        if (home) {
+            cloud_ = creds.home;
+        } else if (ad_supported_) {
+            cloud_ = *creds.cloud_f2p;
+            log("using the ad-supported offering");
+        } else {
+            cloud_ = creds.cloud;
+        }
         // Without a host every request goes out as a bare path, which curl
         // rejects as a malformed URL -- a useless error for the one thing that
         // actually went wrong: the remote-play login did not come back.
