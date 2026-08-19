@@ -259,6 +259,27 @@ private:
     // the media pump, so back off briefly instead.
     std::atomic<Uint64> input_backoff_until_{0};
     std::atomic<uint32_t> input_backoff_skips_{0};
+    std::atomic<uint32_t> input_idle_skips_{0};
+    // Idle suppression state (input thread only). Every frame we send on the
+    // reliable input channel must be delivered in order, so repeating an
+    // unchanged pad state 125 times a second is pure buffer pressure -- it is
+    // what fills the send buffer during a lag spike and then makes the server
+    // work through stale frames before a current one. The official client
+    // suppresses idle pads the same way.
+    struct PadSnapshot {
+        uint32_t buttons = 0;  // packed digital state
+        int16_t lx = 0, ly = 0, rx = 0, ry = 0;
+        uint16_t lt = 0, rt = 0;
+        bool operator==(const PadSnapshot& o) const {
+            return buttons == o.buttons && lx == o.lx && ly == o.ly &&
+                   rx == o.rx && ry == o.ry && lt == o.lt && rt == o.rt;
+        }
+    };
+    PadSnapshot last_pad_;
+    Uint64 last_pad_send_ = 0;  // tick of the last frame actually sent
+    // Set by the worker thread on a reconnect, read on the input thread:
+    // the replacement transport needs the full pad state once, unsuppressed.
+    std::atomic<bool> pad_dirty_{true};
     // request_input_recovery() -> worker thread, and the tick of the last
     // manual attempt so a second press can escalate.
     std::atomic<uint32_t> manual_recovery_requests_{0};

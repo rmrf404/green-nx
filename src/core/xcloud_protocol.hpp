@@ -19,7 +19,15 @@ struct ChannelConfig {
 };
 
 constexpr ChannelConfig kControlChannel{"control", "controlV1", true, -1};
-constexpr ChannelConfig kInputChannel{"input", "1.0", false, 0};
+// Reliable and ordered, which is what both the official client
+// (setupLegacyInputDataChannel: ordered, no maxRetransmits) and greenlight
+// use for protocol "1.0". It has to be: a v1 report is absolute pad state
+// numbered by a running sequence, and the server stops applying input once it
+// sees a gap in that numbering (#45). An unreliable channel turns ordinary
+// packet loss into exactly such a gap. Loss tolerance on this channel is a
+// protocol-level feature instead: the "2.0" model (unreliableinput +
+// reliableinput, frame deltas with acks) is built for it.
+constexpr ChannelConfig kInputChannel{"input", "1.0", true, -1};
 constexpr ChannelConfig kMessageChannel{"message", "messageV1", true, -1};
 constexpr ChannelConfig kChatChannel{"chat", "chatV1", true, -1};
 

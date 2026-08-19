@@ -189,6 +189,10 @@ void Engine::start_common(const std::string& title_id, QualityTier tier,
     input_rx_last_ = 0;
     input_backoff_until_ = 0;
     input_backoff_skips_ = 0;
+    input_idle_skips_ = 0;
+    last_pad_ = PadSnapshot{};
+    last_pad_send_ = 0;
+    pad_dirty_ = true;
     manual_recovery_requests_ = 0;
     last_manual_recovery_ = 0;
     peer_state_ = PEER_CONNECTION_NEW;  // previous session left it CLOSED
@@ -965,6 +969,7 @@ void Engine::rearm_for_resume() {
     video_bytes_ = 0;  // HUD bitrate window restarts with the new transport
     input_rx_ = 0;      // the old transport's server input traffic proves
     input_rx_last_ = 0; // nothing about the replacement's
+    pad_dirty_ = true;  // the new transport needs the full pad state once
     peer_state_ = PEER_CONNECTION_NEW;
     channels_open_ = false;
     handshake_done_ = false;
@@ -1515,6 +1520,7 @@ bool Engine::run_peer(GssvSession& session) {
                     " fail=" + std::to_string(in_fail) +
                     " rx=" + std::to_string(in_rx) +
                     " bo=" + std::to_string(input_backoff_skips_.exchange(0)) +
+                    " idle=" + std::to_string(input_idle_skips_.exchange(0)) +
                     " rxage=" +
                     (rx_last && now >= rx_last
                          ? std::to_string((now - rx_last) / 1000) + "s"
@@ -1875,8 +1881,41 @@ void Engine::send_gamepad(const xcloud::GamepadFrame& frame) {
     // keeps the buffer wedged and holds peer_mutex_ away from the media pump,
     // so give the association a moment. Sends resume the instant it drains.
     Uint64 backoff = input_backoff_until_.load(std::memory_order_relaxed);
-    if (backoff && SDL_GetTicks64() < backoff) {
+    Uint64 pad_now = SDL_GetTicks64();
+    if (backoff && pad_now < backoff) {
         input_backoff_skips_++;
+        return;
+    }
+    // Idle suppression, the way the official client does it: an unchanged pad
+    // is not worth a packet. Every frame on this channel is reliable and
+    // ordered, so repeating one 125 times a second is what fills the send
+    // buffer during a lag spike and then makes the server work through stale
+    // frames before a current one. Comparison is exact and against the
+    // wire-quantized state, so no real input is ever delayed by more than one
+    // 8 ms tick (a noisy stick at rest still sends; raising the Deadzone
+    // setting is what silences that). A genuinely idle pad costs one
+    // heartbeat frame every 250 ms.
+    PadSnapshot pad;
+    pad.buttons =
+        (frame.nexus ? 1u << 0 : 0) | (frame.menu ? 1u << 1 : 0) |
+        (frame.view ? 1u << 2 : 0) | (frame.a ? 1u << 3 : 0) |
+        (frame.b ? 1u << 4 : 0) | (frame.x ? 1u << 5 : 0) |
+        (frame.y ? 1u << 6 : 0) | (frame.dpad_up ? 1u << 7 : 0) |
+        (frame.dpad_down ? 1u << 8 : 0) | (frame.dpad_left ? 1u << 9 : 0) |
+        (frame.dpad_right ? 1u << 10 : 0) |
+        (frame.left_shoulder ? 1u << 11 : 0) |
+        (frame.right_shoulder ? 1u << 12 : 0) |
+        (frame.left_thumb ? 1u << 13 : 0) |
+        (frame.right_thumb ? 1u << 14 : 0);
+    pad.lx = static_cast<int16_t>(frame.left_x * 32767.0f);
+    pad.ly = static_cast<int16_t>(frame.left_y * 32767.0f);
+    pad.rx = static_cast<int16_t>(frame.right_x * 32767.0f);
+    pad.ry = static_cast<int16_t>(frame.right_y * 32767.0f);
+    pad.lt = static_cast<uint16_t>(frame.left_trigger * 65535.0f);
+    pad.rt = static_cast<uint16_t>(frame.right_trigger * 65535.0f);
+    if (!pad_dirty_ && pad == last_pad_ && last_pad_send_ &&
+        pad_now >= last_pad_send_ && pad_now - last_pad_send_ < 250) {
+        input_idle_skips_++;
         return;
     }
     // Bounded wait, never a full block: if the worker wedges inside libpeer
@@ -1906,6 +1945,9 @@ void Engine::send_gamepad(const xcloud::GamepadFrame& frame) {
     if (send_binary_on_channel_locked("input", packet)) {
         input_sent_++;
         input_backoff_until_ = 0;
+        last_pad_ = pad;
+        last_pad_send_ = pad_now;
+        pad_dirty_ = false;
     } else {
         input_send_fail_++;
         input_backoff_until_ = SDL_GetTicks64() + 100;
