@@ -1224,6 +1224,7 @@ bool Engine::run_peer(GssvSession& session) {
     Uint64 revive_fired_at = 0;     // revive sent, watching for server traffic
     bool revive_had_baseline = false;  // server rumbled within 15 s pre-burst
     Uint64 last_revive = 0;         // cooldown between revive attempts
+    int auto_revives = 0;           // automatic ones, capped per transport
     Uint64 negotiation_started = SDL_GetTicks64();
     Uint64 last_loop_tick = SDL_GetTicks64();  // detects a suspended app
     bool opened_channels = false;
@@ -1562,8 +1563,13 @@ bool Engine::run_peer(GssvSession& session) {
                 prev_audio_under = a.underruns;
                 bool burst = lost_delta >= 3 || drop_delta >= 150 ||
                              under_delta >= 3;
+                // A revive re-announces the pad, i.e. a virtual hotplug, and
+                // some games react to one. A rough session can disrupt media
+                // every few seconds, so bound the churn: minutes apart and a
+                // handful per transport at most. The player's own ZL+ZR+up is
+                // the unbounded path -- they can see whether it helped.
                 if (burst && !revive_due && !revive_fired_at &&
-                    now - last_revive > 10000) {
+                    auto_revives < 3 && now - last_revive > 45000) {
                     revive_had_baseline =
                         rx_last && now >= rx_last && now - rx_last < 15000;
                     revive_due = now + 2000;  // let the burst settle first
@@ -1571,6 +1577,7 @@ bool Engine::run_peer(GssvSession& session) {
                 if (revive_due && now >= revive_due && handshake_done_) {
                     revive_due = 0;
                     last_revive = now;
+                    ++auto_revives;
                     revive_input("after media disruption");
                     revive_fired_at = now;
                 }
