@@ -187,6 +187,10 @@ void Engine::start_common(const std::string& title_id, QualityTier tier,
     input_send_fail_ = 0;
     input_rx_ = 0;
     input_rx_last_ = 0;
+    input_backoff_until_ = 0;
+    input_backoff_skips_ = 0;
+    manual_recovery_requests_ = 0;
+    last_manual_recovery_ = 0;
     peer_state_ = PEER_CONNECTION_NEW;  // previous session left it CLOSED
     pli_sent_ = 0;
     // Cumulative, and the HUD's bitrate window starts from zero in run_peer:
@@ -676,6 +680,7 @@ void Engine::worker() {
         // session, but a network that kills SCTP every minute must not loop
         // forever.
         int midstream_reconnects = 0;
+        Uint64 reconnect_window_start = 0;
         for (int attempt = 0; attempt < attempts && !quit_; ++attempt) {
             if (attempt > 0) {
                 std::string of = " (attempt " + std::to_string(attempt + 1) +
@@ -763,6 +768,17 @@ void Engine::worker() {
                         // fresh-session reconnect take 40 s. The fresh
                         // session below stays as the fallback for a session
                         // the server has already given up on.
+                        // Budget over a moving window, not over the stream: a
+                        // network that dies every few minutes is worth
+                        // recovering from all evening (each recovery costs
+                        // ~5 s), while three deaths inside two minutes means
+                        // the link is not usable and the user should hear it.
+                        Uint64 rnow = SDL_GetTicks64();
+                        if (!reconnect_window_start ||
+                            rnow - reconnect_window_start > 120000) {
+                            reconnect_window_start = rnow;
+                            midstream_reconnects = 0;
+                        }
                         if (++midstream_reconnects > 3) {
                             fail("The connection keeps dropping, please "
                                  "start the stream again");
@@ -771,7 +787,8 @@ void Engine::worker() {
                         }
                         log("reconnecting after datachannel death (" +
                             std::to_string(midstream_reconnects) +
-                            "/3): re-signaling the same session");
+                            "/3 in this 2 min window): re-signaling the same "
+                            "session");
                         resuming_ = true;
                         rearm_for_resume();
                         set_status("Reconnecting...");
@@ -874,6 +891,30 @@ void Engine::worker() {
     } catch (const std::exception& error) {
         fail(error.what());
     }
+}
+
+void Engine::revive_input(const char* reason) {
+    Uint64 now = SDL_GetTicks64();
+    Uint64 rx_last = input_rx_last_.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::timed_mutex> lock(peer_mutex_);
+        if (!peer_ || !handshake_done_) return;
+        {
+            // client_metadata consumes a sequence number; a refused send has
+            // to give it back or the gap kills input the #45 way.
+            std::lock_guard<std::mutex> input_lock(input_mutex_);
+            if (!send_binary_on_channel_locked("input",
+                                               input_.client_metadata()))
+                input_.rollback_sequence();
+        }
+        send_on_channel_locked("control", xcloud::gamepad_changed(0, false));
+        send_on_channel_locked("control", xcloud::gamepad_changed(0, true));
+    }
+    log(std::string("input revive (") + reason +
+        "): pad re-announced, server input traffic last seen " +
+        (rx_last && now >= rx_last
+             ? std::to_string((now - rx_last) / 1000) + "s ago"
+             : "never"));
 }
 
 void Engine::rearm_for_resume() {
@@ -1176,7 +1217,9 @@ bool Engine::run_peer(GssvSession& session) {
     int input_dead_seconds = 0;          // consecutive all-fail input seconds
     // Server-side input wedge ladder (#61, second kind): burst detector and
     // one-shot revive/escalation state. See the stats block below.
-    uint32_t prev_audio_lost = 0;   // audio loss counter at the last tick
+    uint32_t prev_audio_lost = 0;   // audio counters at the last tick
+    uint32_t prev_audio_drop = 0;
+    uint32_t prev_audio_under = 0;
     Uint64 revive_due = 0;          // burst seen: revive scheduled for then
     Uint64 revive_fired_at = 0;     // revive sent, watching for server traffic
     bool revive_had_baseline = false;  // server rumbled within 15 s pre-burst
@@ -1282,6 +1325,21 @@ bool Engine::run_peer(GssvSession& session) {
         }
         last_loop_tick = now;
         worker_tick_.store(now, std::memory_order_relaxed);
+
+        // Player-triggered recovery (#61). Some wedges leave no trace in any
+        // counter, so the person holding the controller is the detector of
+        // last resort: one press revives the pad in-band, a second press
+        // within 10 s escalates to the reconnect.
+        if (manual_recovery_requests_.exchange(0) && handshake_done_) {
+            Uint64 prev = last_manual_recovery_.exchange(now);
+            if (prev && now > prev && now - prev < 10000) {
+                log("manual recovery pressed again: reconnecting");
+                set_status("Reconnecting...");
+                reconnect_requested_ = true;
+                return false;
+            }
+            revive_input("manual");
+        }
         // Media-stall watchdog. RTP stops the moment a session really ends,
         // but libpeer needs ~20 s of failed consent checks to notice, and a
         // half-open path may never close at all. Ten seconds without a single
@@ -1455,6 +1513,7 @@ bool Engine::run_peer(GssvSession& session) {
                     " drop=" + std::to_string(in_drop) +
                     " fail=" + std::to_string(in_fail) +
                     " rx=" + std::to_string(in_rx) +
+                    " bo=" + std::to_string(input_backoff_skips_.exchange(0)) +
                     " rxage=" +
                     (rx_last && now >= rx_last
                          ? std::to_string((now - rx_last) / 1000) + "s"
@@ -1486,10 +1545,24 @@ bool Engine::run_peer(GssvSession& session) {
                 // pad through the hotplug path (cheap, in-band); if the
                 // server was rumbling before the burst and stays silent
                 // after the revive, hand off to the reconnect machinery.
+                // Trigger on any shape of media disruption, not just packet
+                // loss: the reports where a controller died on a LATENCY
+                // spike had lost=0 throughout, and only the audio ring
+                // shedding (drop_ms) and underruns showed the hit at all.
                 uint32_t lost_delta =
                     a.lost >= prev_audio_lost ? a.lost - prev_audio_lost : 0;
+                uint32_t drop_delta = a.dropped_ms >= prev_audio_drop
+                                          ? a.dropped_ms - prev_audio_drop
+                                          : 0;
+                uint32_t under_delta = a.underruns >= prev_audio_under
+                                           ? a.underruns - prev_audio_under
+                                           : 0;
                 prev_audio_lost = a.lost;
-                if (lost_delta >= 3 && !revive_due && !revive_fired_at &&
+                prev_audio_drop = a.dropped_ms;
+                prev_audio_under = a.underruns;
+                bool burst = lost_delta >= 3 || drop_delta >= 150 ||
+                             under_delta >= 3;
+                if (burst && !revive_due && !revive_fired_at &&
                     now - last_revive > 10000) {
                     revive_had_baseline =
                         rx_last && now >= rx_last && now - rx_last < 15000;
@@ -1498,31 +1571,8 @@ bool Engine::run_peer(GssvSession& session) {
                 if (revive_due && now >= revive_due && handshake_done_) {
                     revive_due = 0;
                     last_revive = now;
-                    {
-                        std::lock_guard<std::timed_mutex> lock(peer_mutex_);
-                        if (peer_) {
-                            {
-                                // client_metadata consumes a sequence number;
-                                // a refused send must give it back or the gap
-                                // kills input the #45 way.
-                                std::lock_guard<std::mutex> input_lock(
-                                    input_mutex_);
-                                if (!send_binary_on_channel_locked(
-                                        "input", input_.client_metadata()))
-                                    input_.rollback_sequence();
-                            }
-                            send_on_channel_locked(
-                                "control", xcloud::gamepad_changed(0, false));
-                            send_on_channel_locked(
-                                "control", xcloud::gamepad_changed(0, true));
-                        }
-                    }
+                    revive_input("after media disruption");
                     revive_fired_at = now;
-                    log(std::string("input revive: pad re-announced after "
-                                    "loss burst") +
-                        (revive_had_baseline
-                             ? ""
-                             : " (no rumble baseline: no escalation)"));
                 }
                 if (revive_fired_at) {
                     Uint64 rx_now =
@@ -1813,6 +1863,15 @@ void Engine::send_gamepad(const xcloud::GamepadFrame& frame) {
     if (peer_state != PEER_CONNECTION_CONNECTED &&
         peer_state != PEER_CONNECTION_COMPLETED)
         return;
+    // A refused send means usrsctp's send buffer is full: the association has
+    // stopped draining. Pushing another frame 8 ms later cannot help, it just
+    // keeps the buffer wedged and holds peer_mutex_ away from the media pump,
+    // so give the association a moment. Sends resume the instant it drains.
+    Uint64 backoff = input_backoff_until_.load(std::memory_order_relaxed);
+    if (backoff && SDL_GetTicks64() < backoff) {
+        input_backoff_skips_++;
+        return;
+    }
     // Bounded wait, never a full block: if the worker wedges inside libpeer
     // while holding peer_mutex_, an unbounded lock here froze presentation,
     // input polling and the exit combo with it (#45). Dropping one 125 Hz
@@ -1839,8 +1898,10 @@ void Engine::send_gamepad(const xcloud::GamepadFrame& frame) {
     }
     if (send_binary_on_channel_locked("input", packet)) {
         input_sent_++;
+        input_backoff_until_ = 0;
     } else {
         input_send_fail_++;
+        input_backoff_until_ = SDL_GetTicks64() + 100;
         // Give the unused number back so the next frame stays contiguous.
         std::lock_guard<std::mutex> input_lock(input_mutex_);
         input_.rollback_sequence();

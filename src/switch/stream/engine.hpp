@@ -111,6 +111,21 @@ public:
     void send_gamepad(const xcloud::GamepadFrame& frame);
     void request_keyframe();
 
+    // Player-triggered controller recovery (#61). The player is the only
+    // reliable detector of a wedged controller: some wedges leave no trace in
+    // any counter we keep. First press re-announces the pad in-band (cheap,
+    // no interruption); a second press within 10 s escalates to the
+    // same-session reconnect. Safe from the UI thread; the work happens on
+    // the worker thread.
+    void request_input_recovery() {
+        manual_recovery_requests_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Writes one line into the active stream log. For UI-side events worth
+    // seeing in a bug report (a reopened joystick handle); no-op when no
+    // stream is running.
+    void log_note(const std::string& line) { log(line); }
+
     // Controller rumble decoded from the server's "input" channel. The main
     // thread (which owns the SDL joystick) drains the latest command once per
     // frame and actuates it via SDL_JoystickRumble -- keeping every SDL joystick
@@ -137,6 +152,12 @@ private:
     // normally resets, so the replacement transport negotiates against a
     // clean slate while state_ stays pinned to Streaming. Worker thread.
     void rearm_for_resume();
+    // Re-announces the gamepad to the server: ClientMetadata on the input
+    // channel plus a remove/add pair on control, i.e. the hotplug path the
+    // server already knows how to handle. Cheap and in-band, so it is the
+    // first rung of every controller recovery. Worker thread; takes
+    // peer_mutex_ itself.
+    void revive_input(const char* reason);
     void set_status(const std::string& status);
     void end_session();  // server closed the session: stop, not fail
     void fail(const std::string& error);
@@ -232,6 +253,16 @@ private:
     // second kind) -- sends succeed, so the failure counters above are blind.
     std::atomic<uint32_t> input_rx_{0};
     std::atomic<Uint64> input_rx_last_{0};  // tick of the newest such report
+    // Send-buffer backpressure. A refused input send means usrsctp's send
+    // buffer is full (EAGAIN): the association stopped draining. Hammering it
+    // 125 times a second only adds pressure and holds peer_mutex_ away from
+    // the media pump, so back off briefly instead.
+    std::atomic<Uint64> input_backoff_until_{0};
+    std::atomic<uint32_t> input_backoff_skips_{0};
+    // request_input_recovery() -> worker thread, and the tick of the last
+    // manual attempt so a second press can escalate.
+    std::atomic<uint32_t> manual_recovery_requests_{0};
+    std::atomic<Uint64> last_manual_recovery_{0};
 
     VideoDecoder video_;  // width()/height() are render-thread reads only
 #ifdef __SWITCH__

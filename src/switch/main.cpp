@@ -404,6 +404,7 @@ struct App {
     std::unique_ptr<stream::Engine> engine;
     Uint32 stream_hint_until = 0;
     bool hud_combo_latch = false;  // ZL+ZR+- held: toggle HUD once per press
+    bool revive_combo_latch = false;  // ZL+ZR+up held: one recovery per press
     bool deko_active = false;  // deko3d owns the display (SDL suspended)
     Uint32 last_input_ms = 0;  // input pacing during deko3d streaming
 #ifdef __SWITCH__
@@ -2165,7 +2166,7 @@ void draw_stream(App& app, SDL_Joystick* joystick) {
     // no overlay can be drawn on Switch — this screen is the last chance.
     app.gfx.text_centered(
         "In the stream:  hold  −  and  +  together to leave   ·   "
-        "press  L3 + R3  together for the Xbox guide menu",
+        "ZL + ZR + up  if the controller stops responding",
         gfx::kWidth / 2, 920, gfx::FontSize::Small, gfx::kTextDim);
 
     // Source/quality chip, top right.
@@ -2219,6 +2220,7 @@ struct Input {
     bool plus = false, minus = false, zl = false, zr = false;
     bool l = false, r = false;
     bool quit = false;
+    bool joystick_reopened = false;  // zombie-handle recovery fired this poll
     bool touch = false;            // a finger tapped this frame
     int touch_x = 0, touch_y = 0;  // tap position in 1920x1080 design space
     int swipe_rows = 0;            // vertical swipe -> grid rows to scroll
@@ -2390,6 +2392,7 @@ Input poll_input(SDL_Joystick*& joystick) {
         if (s_zombie_since && now - s_zombie_since >= 250) {
             std::printf("[input] SDL joystick stale -- reopening handle\n");
             std::fflush(stdout);
+            input.joystick_reopened = true;  // recorded in the stream log
             SDL_JoystickClose(joystick);
             joystick = nullptr;
             SDL_JoystickUpdate();
@@ -2487,6 +2490,13 @@ int main(int argc, char** argv) {
     while (running) {
         Input input = poll_input(joystick);
         if (input.quit) break;
+#ifdef GNX_NATIVE_STREAM
+        // A zombie handle is invisible in the stream log otherwise, and a
+        // controller that died right then is exactly what gets reported.
+        if (input.joystick_reopened && app.engine)
+            app.engine->log_note("input| SDL joystick handle was stale, "
+                                 "reopened");
+#endif
 
         // A tap on the footer hint bar acts as that button press.
         if (input.touch) {
@@ -2947,6 +2957,20 @@ int main(int argc, char** argv) {
                         app.engine->set_debug_hud(app.settings.debug_hud != 0);
                     }
                     app.hud_combo_latch = hud_combo;
+                    // Controller recovery combo (#61): ZL + ZR + d-pad up.
+                    // Some input wedges leave no trace in any counter we
+                    // keep, so the player needs a way to say "my controller
+                    // is dead" -- one press re-announces the pad, a second
+                    // within 10 s reconnects the session (a few seconds of
+                    // frozen picture, then everything is back).
+                    bool revive_combo =
+                        joystick && !minus_held && !plus_held &&
+                        SDL_JoystickGetButton(joystick, kBtnZL) &&
+                        SDL_JoystickGetButton(joystick, kBtnZR) &&
+                        SDL_JoystickGetButton(joystick, kBtnUp);
+                    if (revive_combo && !app.revive_combo_latch)
+                        app.engine->request_input_recovery();
+                    app.revive_combo_latch = revive_combo;
                 } else if (stream_state == stream::EngineState::Stopped) {
                     // The server ended the session (stream stopped on the
                     // console, console switched off). Nothing to retry and

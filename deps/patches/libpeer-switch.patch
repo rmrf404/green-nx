@@ -499,7 +499,7 @@ index dd54616..0d9ef47 100644
  
  int dtls_srtp_probe(uint8_t* buf) {
 diff --git a/src/peer_connection.c b/src/peer_connection.c
-index c763e80..ab93ada 100644
+index c763e80..7bf3200 100644
 --- a/src/peer_connection.c
 +++ b/src/peer_connection.c
 @@ -45,6 +45,10 @@ struct PeerConnection {
@@ -776,19 +776,28 @@ index c763e80..ab93ada 100644
    memcpy(msg + 2, &priority_big_endian, sizeof(uint16_t));
    memcpy(msg + 4, &reliability_big_endian, sizeof(uint32_t));
    memcpy(msg + 8, &label_length, sizeof(uint16_t));
-@@ -277,6 +478,11 @@ int peer_connection_create_datachannel_sid(PeerConnection* pc, DecpChannelType c
+@@ -277,6 +478,20 @@ int peer_connection_create_datachannel_sid(PeerConnection* pc, DecpChannelType c
  
    rtrn = sctp_outgoing_data(&pc->sctp, msg, msg_size, PPID_CONTROL, sid);
    free(msg);
 +  // Record the label->sid mapping for locally-opened channels so that
 +  // peer_connection_lookup_sid()/_label() work for sends (the mapping was
 +  // previously only added when a DATA_CHANNEL_OPEN was *received*).
-+  if (rtrn >= 0)
++  if (rtrn >= 0) {
 +    sctp_add_stream_mapping(&pc->sctp, label, sid);
++    // Register the policy only after the DCEP open above has gone out, so the
++    // handshake itself is never sent unreliably. Channel type bit 7 = the
++    // unordered variant; the low bits pick the partial-reliability flavour
++    // (0x01 = retransmission-limited, which is what a WebRTC channel opened
++    // with maxRetransmits uses).
++    uint8_t flavour = channel_type & 0x7f;
++    sctp_set_stream_reliability(&pc->sctp, sid, (channel_type & 0x80) != 0,
++                                flavour == 0x01, reliability_parameter);
++  }
    return rtrn;
  }
  
-@@ -325,6 +531,7 @@ int peer_connection_loop(PeerConnection* pc) {
+@@ -325,6 +540,7 @@ int peer_connection_loop(PeerConnection* pc) {
            peer_connection_incoming_rtcp(pc, pc->agent_buf, pc->agent_ret);
  
          } else if (dtls_srtp_probe(pc->agent_buf)) {
@@ -796,7 +805,7 @@ index c763e80..ab93ada 100644
            int ret = dtls_srtp_read(&pc->dtls_srtp, pc->temp_buf, sizeof(pc->temp_buf));
            LOGD("Got DTLS data %d", ret);
  
-@@ -332,6 +539,11 @@ int peer_connection_loop(PeerConnection* pc) {
+@@ -332,6 +548,11 @@ int peer_connection_loop(PeerConnection* pc) {
              sctp_incoming_data(&pc->sctp, (char*)pc->temp_buf, ret);
            }
  
@@ -808,7 +817,7 @@ index c763e80..ab93ada 100644
          } else if (rtp_packet_validate(pc->agent_buf, pc->agent_ret)) {
            LOGD("Got RTP packet");
  
-@@ -342,6 +554,26 @@ int peer_connection_loop(PeerConnection* pc) {
+@@ -342,6 +563,26 @@ int peer_connection_loop(PeerConnection* pc) {
              rtp_decoder_decode(&pc->artp_decoder, pc->agent_buf, pc->agent_ret);
            } else if (ssrc == pc->remote_vssrc) {
              rtp_decoder_decode(&pc->vrtp_decoder, pc->agent_buf, pc->agent_ret);
@@ -835,7 +844,7 @@ index c763e80..ab93ada 100644
            }
  
          } else {
-@@ -365,7 +597,9 @@ int peer_connection_loop(PeerConnection* pc) {
+@@ -365,7 +606,9 @@ int peer_connection_loop(PeerConnection* pc) {
        break;
    }
  
@@ -846,7 +855,7 @@ index c763e80..ab93ada 100644
  }
  
  void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp, SdpType type) {
-@@ -432,7 +666,11 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
+@@ -432,7 +675,11 @@ static const char* peer_connection_create_sdp(PeerConnection* pc, SdpType sdp_ty
  
    switch (sdp_type) {
      case SDP_TYPE_OFFER:
@@ -859,7 +868,7 @@ index c763e80..ab93ada 100644
        agent_clear_candidates(&pc->agent);
        pc->agent.mode = AGENT_MODE_CONTROLLING;
        break;
-@@ -578,6 +816,10 @@ char* peer_connection_lookup_sid_label(PeerConnection* pc, uint16_t sid) {
+@@ -578,6 +825,10 @@ char* peer_connection_lookup_sid_label(PeerConnection* pc, uint16_t sid) {
  
  int peer_connection_add_ice_candidate(PeerConnection* pc, char* candidate) {
    Agent* agent = &pc->agent;
@@ -984,7 +993,7 @@ index 0a3136a..9239e67 100644
    return (int)size;
  }
 diff --git a/src/sctp.c b/src/sctp.c
-index 644f8d8..a67c2ed 100644
+index 644f8d8..db225f7 100644
 --- a/src/sctp.c
 +++ b/src/sctp.c
 @@ -1,5 +1,6 @@
@@ -994,7 +1003,55 @@ index 644f8d8..a67c2ed 100644
  
  #include "dtls_srtp.h"
  #include "sctp.h"
-@@ -498,7 +499,19 @@ void sctp_usrsctp_init() {
+@@ -104,6 +105,28 @@ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uin
+   spa.sendv_sndinfo.snd_flags = SCTP_EOR;
+   spa.sendv_sndinfo.snd_ppid = htonl(ppid);
+ 
++  // Honour the channel's negotiated delivery policy for data (never for the
++  // DCEP handshake, which has to arrive). An unreliable unordered channel
++  // otherwise behaved as reliable+ordered here, which is what turned a lag
++  // spike into a permanently wedged input channel: frames could not be
++  // dropped, so the send buffer filled (EAGAIN) and the peer had to receive
++  // every stale frame in order before any fresh one.
++  if (ppid != DATA_CHANNEL_PPID_CONTROL) {
++    int i;
++    for (i = 0; i < sctp->stream_count; i++) {
++      if (sctp->stream_table[i].sid != sid)
++        continue;
++      if (sctp->stream_table[i].unordered)
++        spa.sendv_sndinfo.snd_flags |= SCTP_UNORDERED;
++      if (sctp->stream_table[i].partial_reliable) {
++        spa.sendv_flags |= SCTP_SEND_PRINFO_VALID;
++        spa.sendv_prinfo.pr_policy = SCTP_PR_SCTP_RTX;
++        spa.sendv_prinfo.pr_value = sctp->stream_table[i].max_retransmits;
++      }
++      break;
++    }
++  }
++
+   res = usrsctp_sendv(sctp->sock, buf, len, NULL, 0, &spa, sizeof(spa), SCTP_SENDV_SPA, 0);
+   if (res < 0) {
+     LOGE("sctp sendv error %d: %s", errno, strerror(errno));
+@@ -169,6 +192,18 @@ void sctp_add_stream_mapping(Sctp* sctp, const char* label, uint16_t sid) {
+     LOGE("Stream table full. Cannot add more streams.");
+ }
+ 
++void sctp_set_stream_reliability(Sctp* sctp, uint16_t sid, int unordered, int partial_reliable, uint32_t max_retransmits) {
++  int i;
++  for (i = 0; i < sctp->stream_count; i++) {
++    if (sctp->stream_table[i].sid != sid)
++      continue;
++    sctp->stream_table[i].unordered = unordered ? 1 : 0;
++    sctp->stream_table[i].partial_reliable = partial_reliable ? 1 : 0;
++    sctp->stream_table[i].max_retransmits = max_retransmits;
++    return;
++  }
++}
++
+ void sctp_parse_data_channel_open(Sctp* sctp, uint16_t sid, char* data, size_t length) {
+   if (length < 12)
+     return;  // Not enough data for a DATA_CHANNEL_OPEN message
+@@ -498,7 +533,19 @@ void sctp_usrsctp_init() {
  
  void sctp_usrsctp_deinit() {
  #if CONFIG_USE_USRSCTP
@@ -1016,10 +1073,10 @@ index 644f8d8..a67c2ed 100644
  }
  
 diff --git a/src/sctp.h b/src/sctp.h
-index 1116996..4bf9b02 100644
+index 1116996..e9e3856 100644
 --- a/src/sctp.h
 +++ b/src/sctp.h
-@@ -140,7 +140,7 @@ typedef enum SctpDataPpid {
+@@ -140,11 +140,20 @@ typedef enum SctpDataPpid {
  
  } SctpDataPpid;
  
@@ -1028,11 +1085,29 @@ index 1116996..4bf9b02 100644
  
  typedef struct {
    char label[32];  // Stream label
-@@ -182,6 +182,8 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len);
+   uint16_t sid;    // Stream ID
++  // Per-stream delivery policy, taken from the DCEP channel type the channel
++  // was opened with. Without this every send went out reliable+ordered no
++  // matter what the channel negotiated: a high-rate unreliable channel (game
++  // input at 125 Hz) then piles undroppable frames up behind a loss, filling
++  // the send buffer (sendv EAGAIN storms) and forcing the peer to wait for
++  // ancient frames before it sees current ones.
++  uint8_t unordered;         // send with SCTP_UNORDERED
++  uint8_t partial_reliable;  // apply the PR-SCTP retransmission limit below
++  uint32_t max_retransmits;  // pr_value for SCTP_PR_SCTP_RTX
+ } SctpStreamEntry;
+ 
+ typedef struct Sctp {
+@@ -182,6 +191,13 @@ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len);
  
  int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid);
  
 +void sctp_add_stream_mapping(Sctp* sctp, const char* label, uint16_t sid);
++
++// Applies a channel's negotiated delivery policy to everything sent on that
++// stream afterwards (see SctpStreamEntry). Call once the channel is open: the
++// DCEP handshake itself must stay reliable and ordered.
++void sctp_set_stream_reliability(Sctp* sctp, uint16_t sid, int unordered, int partial_reliable, uint32_t max_retransmits);
 +
  void sctp_onmessage(Sctp* sctp, void (*onmessage)(char* msg, size_t len, void* userdata, uint16_t sid));
  
