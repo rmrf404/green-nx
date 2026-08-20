@@ -1221,13 +1221,18 @@ bool Engine::run_peer(GssvSession& session) {
     bool decode_stall_resynced = false;  // one jitter reset per decode stall
     int input_dead_seconds = 0;          // consecutive all-fail input seconds
     // Server-side input wedge ladder (#61, second kind): burst detector and
-    // one-shot revive/escalation state. See the stats block below.
-    uint32_t prev_audio_lost = 0;   // audio counters at the last tick
-    uint32_t prev_audio_drop = 0;
-    uint32_t prev_audio_under = 0;
+    // one-shot revive state. See the stats block below. The audio counters
+    // are cumulative for the SESSION (the audio player survives a mid-stream
+    // resume), while these locals restart with every transport -- prime them
+    // with the current totals or the first tick after a resume reads the
+    // whole session's history as a fresh loss burst and fires a revive two
+    // seconds into every recovered stream (IsNotASword's pre8 death loop).
+    const auto audio_at_start = audio_.stats();
+    uint32_t prev_audio_lost = audio_at_start.lost;
+    uint32_t prev_audio_drop = audio_at_start.dropped_ms;
+    uint32_t prev_audio_under = audio_at_start.underruns;
     Uint64 revive_due = 0;          // burst seen: revive scheduled for then
     Uint64 revive_fired_at = 0;     // revive sent, watching for server traffic
-    bool revive_had_baseline = false;  // server rumbled within 15 s pre-burst
     Uint64 last_revive = 0;         // cooldown between revive attempts
     int auto_revives = 0;           // automatic ones, capped per transport
     Uint64 negotiation_started = SDL_GetTicks64();
@@ -1546,12 +1551,16 @@ bool Engine::run_peer(GssvSession& session) {
                 // The second way a controller dies (#61): a loss burst can
                 // wedge the SESSION's input pipeline -- our sends keep
                 // succeeding (so the detector above is blind) while the game
-                // stops seeing them. The only client-visible trace is the
-                // server's own input-channel traffic (vibration) going
-                // silent. Ladder: after the burst settles, re-announce the
-                // pad through the hotplug path (cheap, in-band); if the
-                // server was rumbling before the burst and stays silent
-                // after the revive, hand off to the reconnect machinery.
+                // stops seeing them. After the burst settles, re-announce the
+                // pad through the hotplug path (cheap, in-band). That is as
+                // far as automation goes: rx silence afterwards must NOT
+                // escalate to a reconnect, because the server sends one
+                // input-channel frame right after every handshake and then
+                // legitimately goes quiet unless the game rumbles -- pre8
+                // read that as "revive failed" after every recovered
+                // transport and reconnect-looped IsNotASword's session to
+                // death. If the revive was not enough, the player holds
+                // ZL+ZR+up twice and gets the reconnect deliberately.
                 // Trigger on any shape of media disruption, not just packet
                 // loss: the reports where a controller died on a LATENCY
                 // spike had lost=0 throughout, and only the audio ring
@@ -1576,8 +1585,6 @@ bool Engine::run_peer(GssvSession& session) {
                 // the unbounded path -- they can see whether it helped.
                 if (burst && !revive_due && !revive_fired_at &&
                     auto_revives < 3 && now - last_revive > 45000) {
-                    revive_had_baseline =
-                        rx_last && now >= rx_last && now - rx_last < 15000;
                     revive_due = now + 2000;  // let the burst settle first
                 }
                 if (revive_due && now >= revive_due && handshake_done_) {
@@ -1588,20 +1595,18 @@ bool Engine::run_peer(GssvSession& session) {
                     revive_fired_at = now;
                 }
                 if (revive_fired_at) {
+                    // Diagnostics only (see above): did server input-channel
+                    // traffic follow the revive? Vibration-light games make
+                    // silence here normal, so it proves nothing on its own.
                     Uint64 rx_now =
                         input_rx_last_.load(std::memory_order_relaxed);
                     if (rx_now > revive_fired_at) {
                         log("input revive: server input traffic is back");
                         revive_fired_at = 0;
                     } else if (now - revive_fired_at > 8000) {
-                        if (revive_had_baseline) {
-                            log("input revive did not bring the server's "
-                                "input side back: reconnecting");
-                            set_status("Reconnecting...");
-                            reconnect_requested_ = true;
-                            return false;
-                        }
-                        revive_fired_at = 0;  // nothing to judge silence by
+                        log("input revive: no server input traffic since; "
+                            "not judging (quiet games never send any)");
+                        revive_fired_at = 0;
                     }
                 }
             }

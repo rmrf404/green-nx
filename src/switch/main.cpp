@@ -2982,7 +2982,11 @@ int main(int argc, char** argv) {
                         app.engine->stop();
                         app.scene = Scene::Library;
                     }
-                    if (input.a)  // retry the same target
+                    // Retry only once deko3d has handed the display back
+                    // (the block below runs later this same iteration): a
+                    // launch_stream while deko is still active gets its
+                    // fresh engine stop()ed by that very hand-off.
+                    if (input.a && !app.deko_active)
                         launch_stream(app, app.launching_home);
                 } else if (input.b) {  // cancel while connecting
                     app.engine->stop();
