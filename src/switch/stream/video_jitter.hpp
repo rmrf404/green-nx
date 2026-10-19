@@ -59,11 +59,22 @@ private:
     };
 
     Frame* find_or_create(uint32_t ts, uint64_t now_ms);
-    bool try_assemble(Frame& f, std::vector<uint8_t>& au, uint16_t* marker_seq);
+    bool try_assemble(Frame& f, std::vector<uint8_t>& au, uint16_t* marker_seq,
+                      bool expired);
+    bool only_padding_between(uint16_t from, uint16_t to) const;
+    void remember_padding(uint16_t seq);
 
     std::deque<Frame> frames_;         // pending frames, ascending timestamp
     std::optional<uint32_t> last_ts_;  // timestamp of the last emitted frame
     bool waiting_keyframe_ = true;
+
+    // The sequence number a frame has to start at: the packet after the last
+    // popped frame's marker. A gap before the next frame is padding (sent
+    // between frames, never part of one) or a lost packet that may be the new
+    // frame's first fragment, which is worth waiting a retransmit for.
+    bool have_next_ = false;
+    uint16_t next_seq_ = 0;
+    std::deque<uint16_t> padding_seqs_;  // recently seen padding-only packets
 
     // Global sequence tracking for NACK + receiver-report stats.
     bool have_seq_ = false;

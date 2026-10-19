@@ -14,6 +14,10 @@ constexpr size_t kMaxAccessUnitBytes = 2 * 1024 * 1024;
 // only while a frame is already incomplete; healthy frames still emit at once.
 constexpr uint64_t kHoldMs = 200;
 constexpr size_t kMaxFrames = 32;  // safety cap on buffered frames
+// Padding seqs remembered for telling a padding gap from a lost packet, and the
+// widest gap they are asked to explain (the NACK logic never looks further).
+constexpr size_t kMaxPaddingSeqs = 256;
+constexpr uint16_t kMaxPaddingGap = 255;
 const uint8_t kStartCode[4] = {0x00, 0x00, 0x00, 0x01};
 
 bool ts_newer(uint32_t a, uint32_t b) {
@@ -112,6 +116,8 @@ void VideoJitterBuffer::reset() {
     frames_.clear();
     last_ts_.reset();
     waiting_keyframe_ = true;
+    have_next_ = false;
+    padding_seqs_.clear();
     stats_ = {};
     have_seq_ = false;
     max_seq_ = 0;
@@ -154,10 +160,27 @@ VideoJitterBuffer::Frame* VideoJitterBuffer::find_or_create(uint32_t ts,
     return &*frames_.insert(it, std::move(f));
 }
 
+// True when every sequence number from `from` up to (not including) `to` is a
+// padding-only packet this buffer has seen. Padding is sent between frames and
+// consumes sequence numbers, so such a gap is not a loss.
+bool VideoJitterBuffer::only_padding_between(uint16_t from, uint16_t to) const {
+    if (static_cast<uint16_t>(to - from) > kMaxPaddingGap) return false;
+    for (uint16_t s = from; s != to; ++s)
+        if (std::find(padding_seqs_.begin(), padding_seqs_.end(), s) ==
+            padding_seqs_.end())
+            return false;
+    return true;
+}
+
+void VideoJitterBuffer::remember_padding(uint16_t seq) {
+    padding_seqs_.push_back(seq);
+    if (padding_seqs_.size() > kMaxPaddingSeqs) padding_seqs_.pop_front();
+}
+
 // Assemble a complete access unit from a frame if all its packets are present
 // Returns false if the frame is not yet internally complete/assemblable.
 bool VideoJitterBuffer::try_assemble(Frame& f, std::vector<uint8_t>& au,
-                                     uint16_t* marker_seq) {
+                                     uint16_t* marker_seq, bool expired) {
     bool have_marker = false;
     for (const auto& pk : f.packets)
         if (pk.marker) { *marker_seq = pk.seq; have_marker = true; break; }
@@ -185,6 +208,14 @@ bool VideoJitterBuffer::try_assemble(Frame& f, std::vector<uint8_t>& au,
     for (size_t i = 1; i < ordered.size(); ++i)
         if (ordered[i]->seq != static_cast<uint16_t>(ordered[i - 1]->seq + 1))
             return false;  // gap inside the frame -> wait for retransmit
+
+    // The gap in front of the frame: a packet lost right before its first
+    // fragment would otherwise be emitted as a frame missing its first NAL
+    // unit, and the retransmit that completes it would then be discarded as
+    // old. Hold for the retransmit; once the hold expires, emit as before.
+    if (have_next_ && first->seq != next_seq_ && !expired &&
+        !only_padding_between(next_seq_, first->seq))
+        return false;
 
     au.clear();
     for (const Packet* pk : ordered) {
@@ -230,7 +261,10 @@ void VideoJitterBuffer::receive(const uint8_t* rtp, size_t len, uint64_t now_ms,
         max_seq_ = seq;
     }
 
-    if (payload_len == 0) return;  // padding/empty packet: nothing to assemble
+    if (payload_len == 0) {  // padding/empty packet: nothing to assemble
+        remember_padding(seq);
+        return;
+    }
 
     Frame* f = find_or_create(ts, now_ms);
     if (!f) return;  // stale or overflow
@@ -248,8 +282,11 @@ void VideoJitterBuffer::receive(const uint8_t* rtp, size_t len, uint64_t now_ms,
         if (frames_.empty()) break;
         Frame& front = frames_.front();
         uint16_t marker_seq = 0;
-        if (try_assemble(front, au, &marker_seq)) {
+        const bool expired = now_ms - front.first_seen_ms > kHoldMs;
+        if (try_assemble(front, au, &marker_seq, expired)) {
             last_ts_ = front.timestamp;
+            next_seq_ = static_cast<uint16_t>(marker_seq + 1);
+            have_next_ = true;
             frames_.pop_front();
             if (waiting_keyframe_) {
                 if (!has_keyframe(au)) {  // still no clean IDR -> keep dropping
@@ -267,9 +304,10 @@ void VideoJitterBuffer::receive(const uint8_t* rtp, size_t len, uint64_t now_ms,
         // Not assemblable yet. If it has waited long enough, give up on it (a
         // packet was lost and no retransmit came) and resync from the next
         // clean keyframe -- never feed the decoder a broken reference frame.
-        if (now_ms - front.first_seen_ms > kHoldMs) {
+        if (expired) {
             last_ts_ = front.timestamp;
             frames_.pop_front();
+            have_next_ = false;  // the lost frame's end is unknown
             waiting_keyframe_ = true;
             *want_keyframe = true;
             stats_.dropped++;
