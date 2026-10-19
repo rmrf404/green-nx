@@ -292,6 +292,9 @@ struct Settings {
     int debug_hud = 0;  // 0=off, 1=on: on-screen debug overlay while streaming
     int deadzone = 0;   // stick deadzone: index into kDeadzoneLabels/Values
     int nexus = 0;      // Xbox guide button combo: index into kNexusLabels
+    int sort = 0;       // library grid order: 0=A to Z, 1=newest release first
+    int quick_launch = 0;  // library A: 0=open details, 1=play now (B: details)
+    std::string server_region;  // cloud region label (#62); empty = Automatic
 };
 
 constexpr int kLanguageCount = 30;
@@ -394,6 +397,8 @@ struct App {
     int detail_index = -1;   // games[] index shown in Scene::Detail
     int detail_cursor = 0;   // 0 = Play, 1 = favorite, 2 = Play on... (if any)
     std::vector<HomeConsole> consoles;  // linked Xboxes; empty = hide feature
+    // Cloud regions the login offered, for the "Server region" setting (#62).
+    std::vector<ServerRegion> cloud_regions;
     bool launching_home = false;        // what the current stream targets
     int console_cursor = 0;             // selected console (list + launches)
     int pick_cursor = 0;                // SourcePicker: 0 xCloud, 1 your Xbox
@@ -439,6 +444,9 @@ Settings load_settings() {
     settings.deadzone =
         std::clamp(data.value("deadzone", 0), 0, kDeadzoneLevels - 1);
     settings.nexus = std::clamp(data.value("nexus", 0), 0, kNexusModes - 1);
+    settings.sort = std::clamp(data.value("sort", 0), 0, 1);
+    settings.quick_launch = std::clamp(data.value("quick_launch", 0), 0, 1);
+    settings.server_region = data.value("server_region", std::string());
     return settings;
 }
 
@@ -455,7 +463,10 @@ void save_settings(const Settings& settings) {
                 {"sharpness", settings.sharpness},
                 {"debug_hud", settings.debug_hud},
                 {"deadzone", settings.deadzone},
-                {"nexus", settings.nexus}}.dump(2);
+                {"nexus", settings.nexus},
+                {"sort", settings.sort},
+                {"quick_launch", settings.quick_launch},
+                {"server_region", settings.server_region}}.dump(2);
 }
 
 // Streamed console's system language (BCP-47). Games without an in-game
@@ -505,7 +516,7 @@ void apply_region(const Settings& settings) {
 // flags, v3 predates the ad-supported offering: all force a refresh. The
 // cache is the whole catalog (~2400 entries, ~300 KB), which is what search
 // needs to answer "is this game on xCloud?" without going back to the network.
-constexpr int kGamesCacheVersion = 4;
+constexpr int kGamesCacheVersion = 5;  // v5 adds releaseDate for the sort
 
 void save_games_cache(const std::vector<Game>& games) {
     json list = json::array();
@@ -520,7 +531,8 @@ void save_games_cache(const std::vector<Game>& games) {
                         {"ads", game.ad_supported},
                         {"adsGranted", game.ad_granted},
                         {"adsPlayable", game.ad_playable},
-                        {"maxSession", game.max_session_secs}});
+                        {"maxSession", game.max_session_secs},
+                        {"releaseDate", game.release_date}});
     std::ofstream out(user_path("games.json"), std::ios::trunc);
     out << json{{"version", kGamesCacheVersion}, {"games", list}}.dump();
 }
@@ -539,6 +551,7 @@ std::vector<Game> load_games_cache() {
         game.product_id = entry.value("productId", "");
         game.name = entry.value("name", "");
         game.box_art_url = entry.value("boxArt", "");
+        game.release_date = entry.value("releaseDate", "");
         game.owned = entry.value("owned", false);
         game.subscription = entry.value("sub", false);
         game.in_subscription = entry.value("mySub", false);
@@ -658,6 +671,34 @@ void start_signin(App& app) {
     });
 }
 
+// The cloud regions the login offered, cached like the consoles so Settings
+// can list them without a login (#62). Only what the menu needs is kept.
+void save_regions_cache(const std::vector<ServerRegion>& regions) {
+    json list = json::array();
+    for (const ServerRegion& region : regions)
+        list.push_back({{"name", region.name},
+                        {"host", region.host},
+                        {"default", region.is_default}});
+    std::ofstream out(user_path("regions.json"), std::ios::trunc);
+    out << json{{"regions", list}}.dump();
+}
+
+std::vector<ServerRegion> load_regions_cache() {
+    std::vector<ServerRegion> regions;
+    std::ifstream in(user_path("regions.json"));
+    if (!in) return regions;
+    json data = json::parse(in, nullptr, false);
+    if (data.is_discarded() || !data.is_object()) return regions;
+    for (const json& entry : data.value("regions", json::array())) {
+        ServerRegion region;
+        region.name = entry.value("name", "");
+        region.host = entry.value("host", "");
+        region.is_default = entry.value("default", false);
+        if (!region.host.empty()) regions.push_back(std::move(region));
+    }
+    return regions;
+}
+
 void start_library_load(App& app, bool force_refresh) {
     app.load_state = 0;
     app.status = "Connecting to Xbox...";
@@ -670,6 +711,7 @@ void start_library_load(App& app, bool force_refresh) {
                 if (!cached.empty()) {
                     app.games = std::move(cached);
                     app.consoles = load_consoles_cache();
+                    app.cloud_regions = load_regions_cache();
                     app.load_state = 1;
                     return;
                 }
@@ -678,6 +720,12 @@ void start_library_load(App& app, bool force_refresh) {
             StreamingCredentials credentials =
                 app.auth->fetch_streaming_credentials();
             app.status = "Loading your library...";
+            // Regions for the Settings row. A login that offers none keeps the
+            // last list instead of erasing it.
+            if (!credentials.cloud.regions.empty()) {
+                app.cloud_regions = credentials.cloud.regions;
+                save_regions_cache(app.cloud_regions);
+            }
             Http http;
             // Linked consoles for xHome remote play. Non-fatal: no consoles
             // (or an error here) just leaves the source picker hidden. The
@@ -857,6 +905,26 @@ void apply_filter(App& app) {
                 continue;
             if (matches(game)) app.visible.push_back(i);
         }
+    }
+    // Newest release first, by the Store release date. Titles with no date sink
+    // to the end and the rest stay A to Z. History keeps the order it was
+    // played in, so it is left alone.
+    if (app.settings.sort == 1 && app.tab != LibraryTab::History) {
+        auto alpha = [&app](int i) -> const std::string& {
+            const Game& game = app.games[i];
+            return game.name.empty() ? game.title_id : game.name;
+        };
+        std::stable_sort(app.visible.begin(), app.visible.end(),
+                         [&app, &alpha](int a, int b) {
+                             const std::string& date_a =
+                                 app.games[a].release_date;
+                             const std::string& date_b =
+                                 app.games[b].release_date;
+                             if (date_a.empty() != date_b.empty())
+                                 return date_b.empty();
+                             if (date_a != date_b) return date_a > date_b;
+                             return alpha(a) < alpha(b);
+                         });
     }
     app.cursor = std::min(app.cursor,
                           std::max(0, static_cast<int>(app.visible.size()) - 1));
@@ -1133,6 +1201,8 @@ const char* kTabNames[kTabCount] = {"All games", "Favorites", "History",
                                     "Consoles"};
 
 const char* kQualityLabels[3] = {"720p", "1080p", "1080p high bitrate"};
+const char* kSortLabels[2] = {"A to Z", "Newest release"};
+const char* kQuickLaunchLabels[2] = {"Open details", "Play now"};
 const char* kMappingLabels[2] = {"Positional (Switch A = Xbox B)",
                                  "Match labels (Switch A = Xbox A)"};
 const char* kSharpnessLabels[4] = {"Off", "Low", "Medium", "High"};
@@ -1173,6 +1243,7 @@ void launch_stream(App& app, bool home) {
                                                : stream::VideoPacing::Steady);
     app.engine->set_sharpness(app.settings.sharpness);
     app.engine->set_debug_hud(app.settings.debug_hud != 0);
+    app.engine->set_server_region(app.settings.server_region);
     if (app.launching_home)
         app.engine->start_home(selected_console(app).server_id, tier, locale);
     else
@@ -1233,6 +1304,22 @@ std::vector<std::pair<std::string, gfx::Color>> availability_chips(
 
 // One library card. The focused card scales 1.08x (230x345 -> 248x372,
 // centered), gets border+glow and a name plate under it (card 1a layer 1+4).
+// Trims a title to `max_w` pixels, cutting on UTF-8 character boundaries and
+// adding an ellipsis when it had to cut (#37: every card shows its name).
+std::string fit_card_label(App& app, const std::string& text, int max_w) {
+    if (app.gfx.text_width(text, gfx::FontSize::Small) <= max_w) return text;
+    std::string out = text;
+    while (!out.empty()) {
+        out.pop_back();
+        while (!out.empty() &&
+               (static_cast<unsigned char>(out.back()) & 0xC0) == 0x80)
+            out.pop_back();  // continuation byte: drop the whole character
+        if (app.gfx.text_width(out + "…", gfx::FontSize::Small) <= max_w)
+            return out + "…";
+    }
+    return "…";
+}
+
 void draw_card(App& app, const Game& game, const SDL_Rect& card,
                bool focused) {
     SDL_Rect dst = card;
@@ -1272,6 +1359,23 @@ void draw_card(App& app, const Game& game, const SDL_Rect& card,
                               gfx::FontSize::Small, gfx::kBg);
     }
 
+    // Unfocused cards carry their name in a band across the bottom of the
+    // cover, above the availability plate when there is one, so the name fits
+    // inside the card and never reaches the row below or the footer. The
+    // focused card keeps its plate under the cover instead.
+    if (!focused) {
+        const bool badge = !game.playable() || game.needs_ad_offering();
+        const int band_h = 36;
+        SDL_Rect band = {card.x, card.y + card.h - band_h - (badge ? 44 : 0),
+                         card.w, band_h};
+        app.gfx.fill(band, {gfx::kBar.r, gfx::kBar.g, gfx::kBar.b, 200});
+        const std::string& label =
+            game.name.empty() ? game.title_id : game.name;
+        app.gfx.text_centered(fit_card_label(app, label, band.w - 16),
+                              band.x + band.w / 2, band.y + 6,
+                              gfx::FontSize::Small, gfx::kText);
+    }
+
     if (focused) {
         draw_focus_frames(app, dst);
         SDL_Rect plate = {card.x - 18, card.y + kCardH + 14, kCardW + 36, 44};
@@ -1307,6 +1411,21 @@ void draw_empty_state(App& app, const std::string& glyph, gfx::Color glyph_col,
         x += 14 + cw + 14;
     }
     app.gfx.text(post, x, 616, gfx::FontSize::Note, gfx::kTextDim);
+}
+
+// Starts a playable game: asks for the source when a console is linked and the
+// preference is "ask", otherwise launches straight away. Shared by the detail
+// screen's Play and the library's quick launch (#37).
+void play_game(App& app, const Game& game) {
+    app.launch_game = game;
+    push_history(app, app.launch_game.title_id);
+    if (!app.consoles.empty() && app.settings.source == 0) {
+        app.pick_cursor = 0;
+        app.pick_pending = false;
+        app.scene = Scene::SourcePicker;
+    } else {
+        launch_stream(app, app.settings.source == 2);
+    }
 }
 
 void draw_library(App& app) {
@@ -1704,6 +1823,11 @@ void draw_settings(App& app) {
                         : app.settings.source == 1 ? "xCloud"
                                                    : "Ask every time"});
     rows.push_back({"Debug HUD", app.settings.debug_hud ? "On" : "Off"});
+    rows.push_back({"Library order", kSortLabels[app.settings.sort]});
+    rows.push_back({"Library A button", kQuickLaunchLabels[app.settings.quick_launch]});
+    rows.push_back({"Server region", app.settings.server_region.empty()
+                                         ? std::string("Automatic")
+                                         : app.settings.server_region});
     int accounts_row = static_cast<int>(rows.size());
     rows.push_back({"Accounts",
                     std::to_string(g_accounts.size()) +
@@ -1783,6 +1907,15 @@ void draw_settings(App& app) {
         line1 = "Share the console: each account keeps its own sign-in,";
         line2 = "library and favorites. Press A to switch or add one.";
     } else if (app.settings_cursor == accounts_row - 1) {
+        line1 = "Where cloud sessions start. Automatic uses the region xCloud";
+        line2 = "marks as default; pick another to try a closer server.";
+    } else if (app.settings_cursor == accounts_row - 2) {
+        line1 = "Play now starts the focused game with A; B opens its details.";
+        line2 = "Open details keeps A for the details screen, as before.";
+    } else if (app.settings_cursor == accounts_row - 3) {
+        line1 = "Newest release sorts the grid by each game's Store release";
+        line2 = "date. That is not when it joined Game Pass.";
+    } else if (app.settings_cursor == accounts_row - 4) {
         line1 = "On-screen overlay with live stream stats (resolution, FPS,";
         line2 = "bitrate, loss). Toggle in-game by holding ZL + ZR + −.";
     } else switch (app.settings_cursor) {
@@ -2755,9 +2888,21 @@ int main(int argc, char** argv) {
                     app.settings_return = Scene::Library;
                     app.scene = Scene::Settings;
                 }
+                // Card 1f: A opens the detail screen with Play focused, so A-A
+                // still launches as fast as direct launch did. With "Library A
+                // button: Play now" (#37), A launches the focused game and B
+                // opens its details instead; unplayable titles still open them.
+                const bool play_now = app.settings.quick_launch == 1;
                 if (input.a && !app.visible.empty()) {
-                    // Card 1f: A opens the detail screen with Play focused,
-                    // so A-A still launches as fast as direct launch did.
+                    const Game& focused = app.games[app.visible[app.cursor]];
+                    if (play_now && focused.playable()) {
+                        play_game(app, focused);
+                    } else {
+                        app.detail_index = app.visible[app.cursor];
+                        app.detail_cursor = 0;
+                        app.scene = Scene::Detail;
+                    }
+                } else if (input.b && play_now && !app.visible.empty()) {
                     app.detail_index = app.visible[app.cursor];
                     app.detail_cursor = 0;
                     app.scene = Scene::Detail;
@@ -2784,16 +2929,7 @@ int main(int argc, char** argv) {
                         app.settings.source = (app.settings.source + 1) % 3;
                         save_settings(app.settings);
                     } else if (game.playable()) {
-                        app.launch_game = game;
-                        push_history(app, app.launch_game.title_id);
-                        if (!app.consoles.empty() &&
-                            app.settings.source == 0) {
-                            app.pick_cursor = 0;
-                            app.pick_pending = false;
-                            app.scene = Scene::SourcePicker;
-                        } else {
-                            launch_stream(app, app.settings.source == 2);
-                        }
+                        play_game(app, game);
                     }
                 }
                 break;
@@ -2829,10 +2965,14 @@ int main(int argc, char** argv) {
             case Scene::Settings: {
                 // Row order: quality, mapping, vibration, region, language,
                 // volume, pacing, sharpness, deadzone, Xbox button, [source
-                // when a console is linked], Debug HUD, accounts, sign out.
+                // when a console is linked], Debug HUD, library order,
+                // library A button, server region, accounts, sign out.
                 int hud_row = app.consoles.empty() ? 10 : 11;
-                int accounts_row = hud_row + 1;
-                int signout_row = hud_row + 2;
+                int sort_row = hud_row + 1;
+                int quick_row = hud_row + 2;
+                int region_row = hud_row + 3;
+                int accounts_row = hud_row + 4;
+                int signout_row = hud_row + 5;
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
@@ -2918,6 +3058,25 @@ int main(int argc, char** argv) {
                             (app.settings.source + direction + 3) % 3;
                     else if (app.settings_cursor == hud_row)
                         app.settings.debug_hud = app.settings.debug_hud ? 0 : 1;
+                    else if (app.settings_cursor == sort_row) {
+                        app.settings.sort = (app.settings.sort + direction + 2) % 2;
+                        apply_filter(app);  // re-order the grid right away
+                    } else if (app.settings_cursor == quick_row)
+                        app.settings.quick_launch =
+                            (app.settings.quick_launch + direction + 2) % 2;
+                    else if (app.settings_cursor == region_row &&
+                             !app.cloud_regions.empty()) {
+                        // Automatic first, then each region the login offered.
+                        std::vector<std::string> labels = {""};
+                        for (const ServerRegion& region : app.cloud_regions)
+                            labels.push_back(region.label());
+                        const int count = static_cast<int>(labels.size());
+                        int at = 0;
+                        for (int i = 0; i < count; ++i)
+                            if (labels[i] == app.settings.server_region) at = i;
+                        app.settings.server_region =
+                            labels[(at + direction + count) % count];
+                    }
                     save_settings(app.settings);
                 }
                 if (input.b || input.zl) {

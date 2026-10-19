@@ -645,11 +645,13 @@ void Engine::worker() {
         if (home) {
             cloud_ = creds.home;
         } else if (ad_supported_) {
-            cloud_ = *creds.cloud_f2p;
+            cloud_ = creds.cloud_f2p->in_region(server_region_);
             log("using the ad-supported offering");
         } else {
-            cloud_ = creds.cloud;
+            cloud_ = creds.cloud.in_region(server_region_);
         }
+        if (!home && !server_region_.empty())
+            log("cloud region: " + server_region_ + " -> " + cloud_.host);
         // Without a host every request goes out as a bare path, which curl
         // rejects as a malformed URL -- a useless error for the one thing that
         // actually went wrong: the remote-play login did not come back.

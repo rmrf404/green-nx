@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "http.hpp"
 
@@ -21,9 +22,25 @@ struct DeviceCode {
 
 enum class PollResult { Pending, Authorized, Expired };
 
+// One region of a streaming offering, as the login response lists it.
+struct ServerRegion {
+    std::string name;  // label from the login response; may be empty
+    std::string host;  // base URI, e.g. https://uks.gssv-play-prod.xboxlive.com
+    bool is_default = false;
+
+    // What the settings store and the menu shows: the name when the service
+    // gives one, otherwise the subdomain ("uks"), which is the region code.
+    std::string label() const;
+};
+
 struct EndpointCredentials {
     std::string host;   // e.g. https://uks.gssv-play-prod.xboxlive.com
     std::string token;  // gsToken bearer
+    std::vector<ServerRegion> regions;  // every region the login offered
+
+    // A copy aimed at the region labelled `label`. An empty or unknown label
+    // keeps the default host, which is what "Automatic" means.
+    EndpointCredentials in_region(const std::string& label) const;
 };
 
 struct StreamingCredentials {

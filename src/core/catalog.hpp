@@ -13,6 +13,10 @@ struct Game {
     std::string product_id;  // Microsoft Store bigId, for metadata lookup
     std::string name;        // filled by fetch_names()
     std::string box_art_url;
+    // Store OriginalReleaseDate (ISO 8601), from fetch_names(); empty if the
+    // Store does not give one. This is the launch date, not the day the title
+    // joined Game Pass, which the catalog does not expose.
+    std::string release_date;
 
     // How this account can reach the title. Several can be true at once: a
     // game you own is usually in the subscription catalog as well.

@@ -198,17 +198,46 @@ EndpointCredentials XboxAuth::streaming_login(const std::string& gssv_token,
 
     EndpointCredentials credentials;
     credentials.token = response.at("gsToken");
-    for (const json& region :
+    // Keep every region, not just the default one, so the user can pick
+    // another server (#62). The default still decides the host when nothing
+    // is picked, exactly as before.
+    for (const json& entry :
          response.at("offeringSettings").value("regions", json::array())) {
-        if (region.value("isDefault", false)) {
-            credentials.host = region.value("baseUri", "");
-            break;
-        }
+        ServerRegion region;
+        const json name = entry.value("name", json());
+        if (name.is_string()) region.name = name.get<std::string>();
+        region.host = entry.value("baseUri", "");
+        region.is_default = entry.value("isDefault", false);
+        if (region.host.empty()) continue;
+        if (region.is_default && credentials.host.empty())
+            credentials.host = region.host;
+        credentials.regions.push_back(std::move(region));
     }
     if (credentials.host.empty())
         throw std::runtime_error("streaming login " + offering +
                                  ": no default region");
     return credentials;
+}
+
+std::string ServerRegion::label() const {
+    if (!name.empty()) return name;
+    // https://uks.gssv-play-prod.xboxlive.com -> "uks"
+    size_t start = host.find("//");
+    std::string rest = start == std::string::npos ? host : host.substr(start + 2);
+    return rest.substr(0, rest.find('.'));
+}
+
+EndpointCredentials EndpointCredentials::in_region(
+    const std::string& label) const {
+    EndpointCredentials chosen = *this;
+    if (label.empty()) return chosen;
+    for (const ServerRegion& region : regions) {
+        if (region.label() == label) {
+            chosen.host = region.host;
+            break;
+        }
+    }
+    return chosen;
 }
 
 StreamingCredentials XboxAuth::fetch_streaming_credentials() {

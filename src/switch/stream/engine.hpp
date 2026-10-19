@@ -78,6 +78,13 @@ public:
     // before each stream start; default Steady.
     void set_pacing(VideoPacing pacing) { pacing_ = pacing; }
 
+    // Cloud region to start sessions in, by its label (see ServerRegion). Set
+    // from the "Server region" setting before each stream start; empty keeps
+    // the default region ("Automatic").
+    void set_server_region(std::string label) {
+        server_region_ = std::move(label);
+    }
+
     // Luma sharpening level (0=Off..3=High), forwarded to the deko3d
     // renderer. Set from the "sharpness" setting before each stream start.
     void set_sharpness(int level) { sharpness_ = level; }
@@ -194,6 +201,7 @@ private:
     std::string title_id_;
     std::string home_server_id_;  // non-empty selects the home (xhome) path
     bool ad_supported_ = false;   // selects the xgpuwebf2p offering
+    std::string server_region_;   // cloud region label; empty = default
     QualityTier tier_ = QualityTier::P1080HQ;
     std::string locale_ = "en-US";  // streamed console's system language
     float audio_gain_ = 1.0f;       // forwarded to AudioPlayer::set_gain
