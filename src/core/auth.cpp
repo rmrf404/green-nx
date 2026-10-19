@@ -227,7 +227,15 @@ StreamingCredentials XboxAuth::fetch_streaming_credentials() {
         // to stream from a console anyway.
         credentials.home_error = error.what();
     }
-    credentials.cloud = streaming_login(gssv_token, "xgpuweb");
+    try {
+        credentials.cloud = streaming_login(gssv_token, "xgpuweb");
+    } catch (const std::exception& error) {
+        // Same reasoning as the xhome login above: a console can still be
+        // streamed without the cloud offering. Only when neither is left is
+        // there nothing to show, and then the cloud reason is the one to name.
+        credentials.cloud_error = error.what();
+        if (credentials.home.host.empty()) throw;
+    }
     try {
         credentials.cloud_f2p = streaming_login(gssv_token, "xgpuwebf2p");
     } catch (const std::exception&) {

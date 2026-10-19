@@ -34,6 +34,12 @@ struct StreamingCredentials {
     // say so rather than build a request against an empty host.
     std::string home_error;
     EndpointCredentials cloud;
+    // Why the xgpuweb (cloud) login failed, if it did. Xbox answers 404 "Not
+    // Implemented /v2/login/user" to accounts or IPs its geo gate does not
+    // serve (Region bypass is the workaround). That must not take a linked
+    // console's remote play down with it, so the caller decides what it can
+    // still do; an empty host means cloud is unavailable.
+    std::string cloud_error;
     std::optional<EndpointCredentials> cloud_f2p;
 };
 

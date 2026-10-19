@@ -60,6 +60,8 @@ int cmd_whoami(gnx::XboxAuth& auth) {
 // ad-supported one will stream to this account folded in.
 std::vector<gnx::Game> load_catalog(gnx::Http& http,
                                     const gnx::StreamingCredentials& creds) {
+    // Geo-gated: no cloud offering to ask (cloud_error says why).
+    if (creds.cloud.host.empty()) return {};
     std::vector<gnx::Game> catalog = gnx::fetch_catalog(http, creds.cloud);
     if (creds.cloud_f2p)
         gnx::merge_ad_supported(catalog,
@@ -86,7 +88,10 @@ std::string availability(const gnx::Game& game) {
 int cmd_games(gnx::XboxAuth& auth, bool with_names) {
     std::printf("Fetching streaming credentials...\n");
     gnx::StreamingCredentials credentials = auth.fetch_streaming_credentials();
-    std::printf("Cloud endpoint: %s\n", credentials.cloud.host.c_str());
+    if (credentials.cloud.host.empty())
+        std::printf("Cloud unavailable: %s\n", credentials.cloud_error.c_str());
+    else
+        std::printf("Cloud endpoint: %s\n", credentials.cloud.host.c_str());
 
     gnx::Http http;
     std::vector<gnx::Game> catalog = load_catalog(http, credentials);
@@ -169,6 +174,10 @@ int cmd_stream_test(gnx::XboxAuth& auth, const std::string& title_id,
     }
     const gnx::EndpointCredentials& endpoint =
         ad_supported ? *credentials.cloud_f2p : credentials.cloud;
+    if (endpoint.host.empty()) {
+        std::printf("Cloud unavailable: %s\n", credentials.cloud_error.c_str());
+        return 1;
+    }
     std::printf("Offering: %s\n", ad_supported ? "xgpuwebf2p (ads)"
                                                : "xgpuweb");
 

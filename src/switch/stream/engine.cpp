@@ -656,6 +656,8 @@ void Engine::worker() {
         if (cloud_.host.empty()) {
             if (!creds.home_error.empty())
                 log("xhome login failed: " + creds.home_error);
+            if (!creds.cloud_error.empty())
+                log("xgpuweb login failed: " + creds.cloud_error);
             fail(home ? "Your account has no console available for remote "
                         "play right now. Check the console is on and signed "
                         "in, then try again."

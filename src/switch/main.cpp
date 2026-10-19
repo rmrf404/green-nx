@@ -383,6 +383,9 @@ struct App {
     std::vector<std::string> history;    // title_ids, most-recent first
     std::atomic<int> load_state{0};  // 0 running, 1 ok, 2 error
     std::string load_error;
+    // Why the cloud catalog is missing (xgpuweb login refused by the geo
+    // gate). Empty = cloud is there. The library then opens on the consoles.
+    std::string cloud_error;
     std::string gamertag;
     Game launch_game;
     Settings settings;
@@ -660,6 +663,7 @@ void start_signin(App& app) {
 
 void start_library_load(App& app, bool force_refresh) {
     app.load_state = 0;
+    app.cloud_error.clear();
     app.status = "Connecting to Xbox...";
     // Pending lookups belong to the library we are about to replace.
     if (app.names) app.names->reset();
@@ -677,6 +681,7 @@ void start_library_load(App& app, bool force_refresh) {
             app.status = "Fetching streaming credentials...";
             StreamingCredentials credentials =
                 app.auth->fetch_streaming_credentials();
+            app.cloud_error = credentials.cloud_error;
             app.status = "Loading your library...";
             Http http;
             // Linked consoles for xHome remote play. Non-fatal: no consoles
@@ -706,17 +711,22 @@ void start_library_load(App& app, bool force_refresh) {
             // just what this account can play. Keep all of it: the library
             // grid still lists only the playable ones, but search can then
             // say what a title would need instead of "nothing found".
-            std::vector<Game> games = fetch_catalog(http, credentials.cloud);
-            // The ad-supported offering is a separate catalog with its own
-            // entitlements; without it an account with no Game Pass plan has
-            // no way to know what it can stream for free. Non-fatal: the
-            // offering is missing for plenty of accounts and regions.
-            if (credentials.cloud_f2p) {
-                try {
-                    merge_ad_supported(
-                        games, fetch_catalog(http, *credentials.cloud_f2p));
-                } catch (const std::exception&) {
-                    // Leave the cloud catalog as it is.
+            // Geo-gated: there is no cloud catalog to ask for, so the library
+            // holds only the consoles (cloud_error says why).
+            std::vector<Game> games;
+            if (!credentials.cloud.host.empty()) {
+                games = fetch_catalog(http, credentials.cloud);
+                // The ad-supported offering is a separate catalog with its own
+                // entitlements; without it an account with no Game Pass plan
+                // has no way to know what it can stream for free. Non-fatal:
+                // the offering is missing for plenty of accounts and regions.
+                if (credentials.cloud_f2p) {
+                    try {
+                        merge_ad_supported(
+                            games, fetch_catalog(http, *credentials.cloud_f2p));
+                    } catch (const std::exception&) {
+                        // Leave the cloud catalog as it is.
+                    }
                 }
             }
             std::vector<Game*> playable;
@@ -742,7 +752,9 @@ void start_library_load(App& app, bool force_refresh) {
                               b.name.empty() ? b.title_id : b.name;
                           return left < right;
                       });
-            save_games_cache(games);
+            // Without cloud there is nothing new to cache: keep the last good
+            // list instead of overwriting it with an empty one.
+            if (app.cloud_error.empty()) save_games_cache(games);
             app.games = std::move(games);
             app.load_state = 1;
         } catch (const std::exception& error) {
@@ -1425,6 +1437,11 @@ void draw_library(App& app) {
         else if (app.tab == LibraryTab::History)
             draw_empty_state(app, "…", gfx::kTextDim, "Nothing played yet",
                              "Games you launch appear here", nullptr, "");
+        else if (!app.cloud_error.empty())
+            draw_empty_state(app, "", gfx::kWarn,
+                             "Xbox Cloud Gaming isn't available here",
+                             "Press", "ZL",
+                             "for Settings, turn on Region bypass, then ZR");
         else
             draw_empty_state(app, "", gfx::kText,
                              "No games available for this account",
@@ -2625,6 +2642,10 @@ int main(int argc, char** argv) {
                     // Preferred source = your Xbox: land on the Consoles tab
                     // (games stay one L-press away).
                     if (app.settings.source == 2 && !app.consoles.empty())
+                        app.tab = LibraryTab::Consoles;
+                    // Cloud is geo-gated for this account: the consoles are
+                    // the only thing there is to show.
+                    if (!app.cloud_error.empty() && !app.consoles.empty())
                         app.tab = LibraryTab::Consoles;
                     apply_filter(app);
                     app.scene = Scene::Library;
