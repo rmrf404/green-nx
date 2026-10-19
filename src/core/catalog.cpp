@@ -241,6 +241,14 @@ void fetch_names(Http& http, const std::vector<Game*>& games,
             const std::string& uri = !poster.empty() ? poster : box_art;
             if (!uri.empty())
                 found->second->box_art_url = "https:" + uri + "?h=300";
+
+            // The Details template carries the release date on the market
+            // properties; it is the only date the catalog can order titles by.
+            const json markets =
+                product.value("MarketProperties", json::array());
+            if (!markets.empty())
+                found->second->release_date =
+                    markets.front().value("OriginalReleaseDate", "");
         }
     }
 }
